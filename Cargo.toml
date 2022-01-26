@@ -1,0 +1,19 @@
+[package]
+name = "vim-math"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "vim_math"
+crate-type = ["cdylib"]      # Creates dynamic lib
+
+[dependencies]
+tinyjson = "2"
+ueberzug = "0.1"
+lazy_static = "1.4"
+magick_rust = "0.15"
+regex = "1.5.4"
+sha2 = "0.10"
+which = "4"
