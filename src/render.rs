@@ -1,12 +1,10 @@
-use std::fs::File;
-use std::io::{Read, Write, Stdout};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{Write, Stdout};
+use std::collections::HashMap;
 use std::path::Path;
 use std::thread;
 
 use regex::Regex;
 use tinyjson::JsonValue;
-use sha2::{Digest, Sha256};
 use magick_rust::MagickWand;
 
 use crate::error::{Result, Error};
@@ -46,9 +44,27 @@ impl Metadata {
     }
 }
 
-pub enum NodeFile {
-    Generate,
-    InMemory(MagickWand),
+pub struct NodeFile {
+    file: Option<MagickWand>
+}
+
+impl NodeFile {
+    pub fn new(path: &Path) -> NodeFile {
+        // check if file already exists, otherwise initiate creation
+        if !path.exists() {
+
+            NodeFile { file: None }
+        } else {
+            let wand = MagickWand::new();
+            wand.set_resolution(600.0, 600.0).unwrap();
+            wand.read_image(path.to_str().unwrap()).unwrap();
+            NodeFile { file: Some(wand) }
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.file.is_some()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -59,16 +75,6 @@ pub enum NodeState {
     Visible(usize),
 }
 
-impl NodeState {
-    pub fn from_metadata(range: (usize, usize), obj: &Metadata) -> NodeState {
-        NodeState::Hidden
-    }
-
-    pub fn should_update(&self, rhs: &NodeState) -> bool {
-        self != rhs
-    }
-}
-
 pub struct Node {
     id: CodeId,
     file: NodeFile,
@@ -77,22 +83,15 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(content: &str, line: usize) -> Result<Node> {
-        let id = utils::hash(content);
+    pub fn new(content: String, line: usize) -> Result<Node> {
+        let id = utils::hash(&content);
         let range = (line, line + content.matches("\n").count());
 
-        // check if file already exists, otherwise initiate creation
-        let path = Path::new(ART_PATH).join(id).with_extension("svg");
-        let file = if !path.exists() {
-            thread::spawn(move || { crate::utils::parse_equation(&path, content, 1.0)});
-
-            NodeFile::Generate
-        } else {
-            let wand = MagickWand::new();
-            wand.set_resolution(600.0, 600.0).unwrap();
-            wand.read_image(path.to_str().unwrap()).unwrap();
-            NodeFile::InMemory(wand)
-        };
+        let path = Path::new(ART_PATH).join(&id).with_extension("svg");
+        let file = NodeFile::new(&path);
+        if !file.is_available() {
+            thread::spawn(move || { crate::utils::parse_equation(&path, &content, 1.0)});
+        }
 
         // create node, it's hidden bc. we want to render it next cycle
         Ok(Node {
@@ -102,7 +101,7 @@ impl Node {
     }
 
     pub fn step(&self, metadata: &Metadata) -> NodeState {
-        let mut distance_upper = self.range.0 as isize - metadata.file_range.0 as isize;
+        let distance_upper = self.range.0 as isize - metadata.file_range.0 as isize;
 
         let mut start = 0;
         let mut height = self.range.1 - self.range.0;
@@ -131,12 +130,13 @@ impl Node {
 
         NodeState::Visible(start)
     }
-    pub fn line_mapping(&self) -> ((usize, usize), CodeId) {
-        (self.range, self.id.clone())
-    }
 
     pub fn length(&self) -> usize {
         self.range.1 - self.range.0
+    }
+
+    pub fn file_available(&self) -> bool {
+        Path::new(ART_PATH).join(&self.id).with_extension("svg").exists()
     }
 }
 
@@ -144,7 +144,6 @@ pub struct Render {
     stdout: Stdout,
     code_regex: Regex,
     blocks: HashMap<CodeId, Node>,
-    block_lines: BTreeMap<(usize, usize), CodeId>,
     metadata: Metadata
 }
 
@@ -158,31 +157,54 @@ impl Render {
             stdout: std::io::stdout(),
             code_regex: Regex::new(r"```math\n(?P<inner>[\s\S]+?)```").unwrap(),
             blocks: HashMap::new(),
-            block_lines: BTreeMap::new(),
             metadata: Metadata::new(),
         }
     }
 
-    pub fn draw(&mut self) {
-        for (id, node) in self.blocks {
+    pub fn draw(&mut self) -> Result<bool> {
+        let mut pending = false;
+
+        for (_, node) in &mut self.blocks {
             let new_state = node.step(&self.metadata);
+
+            // check if file is now available
+            if self.file.is_available() {
+            }
             
-            let data: Option<(Vec<u8>, usize)> = match (node.file, node.state, new_state) {
-                (NodeFile::InMemory(img), NodeState::Hidden, NodeState::Visible(pos)) => {
+            let data: Option<(Vec<u8>, usize)> = match (&node.file, &node.state, &new_state) {
+                (NodeFile { file: Some(img) }, _, NodeState::Visible(pos)) => {
                     img.fit(100000, node.length() * CHAR_HEIGHT);
                     Some((
                         img.write_image_blob("sixel").unwrap(),
-                        pos
+                        *pos
                     ))
                 }, 
-                (NodeFile::InMemory(img), NodeState::Hidden, NodeState::UpperBorder(p, h) | NodeState::LowerBorder(p, h)) => {
-
-                }
-                (NodeFile::InMemory(img), NodeState::UpperBorder(p, h) | NodeState::LowerBorder(p, h), NodeState::Visible(p2)) => {
+                (NodeFile { file: Some(img) }, NodeState::Hidden, NodeState::UpperBorder(y, height)) => {
+                    // clone and crop
+                    let img = img.clone();
+                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
+                    Some((
+                        img.write_image_blob("sixel").unwrap(),
+                        0
+                    ))
                 },
-                }
-                _ => panic!("")
+                (NodeFile { file: Some(img) }, NodeState::Hidden, NodeState::LowerBorder(pos, height)) => {
+                    // clone and crop
+                    let img = img.clone();
+                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
+                    Some((
+                        img.write_image_blob("sixel").unwrap(),
+                        *pos
+                    ))
+                },
+                (NodeFile { file: None }, _, NodeState::UpperBorder(_, _) | NodeState::LowerBorder(_,_) | NodeState::Visible(_)) => {
+                    pending = true;
+                    None
+                },
+                _ => None
             };
+
+            node.state = new_state;
 
             if let Some((buf, pos)) = data {
                 self.stdout.write(&format!("\x1b[s\x1b[{};0H", pos+1).as_bytes()).unwrap();
@@ -191,52 +213,7 @@ impl Render {
             }
         }
 
-        // get images currently visible
-        let visible_blocks = self.block_lines.iter().filter(|((line, length), _)| {
-            (line + length) > self.metadata.file_range.0 as usize || 
-                *line < self.metadata.file_range.1 as usize
-        }).map(|((line, _), id)| (line, self.blocks.get(id).unwrap())).collect::<Vec<_>>();
-
-        for (line, (img, length)) in visible_blocks {
-            let mut distance_upper = *line as isize - self.metadata.file_range.0 as isize;
-
-            let mut start = 0;
-            let mut height = *length;
-
-            if distance_upper < -(*length as isize) {
-                // if we are above the upper line, just skip
-                continue;
-            } else if distance_upper < 0 {
-                // if we are in the upper cross-over region, calculate the visible height
-                start = (-distance_upper) as usize;
-                height -= start;
-                distance_upper = 0;
-            }
-
-            let distance_lower = self.metadata.viewport.1.max(self.metadata.file_range.1 + 1) as isize - *line as isize;
-
-            dbg!(start, height, distance_upper, distance_lower);
-
-            if distance_lower <= 0 {
-                continue;
-            } else if (distance_lower as usize) < *length {
-                // remove some height if we are in the command line region
-                height -= (*length as isize - distance_lower) as usize;
-            }
-
-            let buf;
-            if start != 0 || height != *length {
-                // clone and crop
-                let img = img.clone();
-                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (start * CHAR_HEIGHT) as isize).unwrap();
-                buf = img.write_image_blob("sixel").unwrap();
-            } else {
-                img.fit(100000, *length * CHAR_HEIGHT);
-                buf = img.write_image_blob("sixel").unwrap();
-            }
-
-
-        }
+        Ok(pending)
     }
 
     pub fn clear_all(&mut self, _: &str) -> Result<()> {
@@ -245,44 +222,36 @@ impl Render {
         Ok(())
     }
 
-    pub fn update_metadata(&mut self, metadata: &str) -> Result<()> {
+    pub fn update_metadata(&mut self, metadata: &str) -> Result<bool> {
         let metadata: JsonValue = metadata.parse().unwrap();
         let metadata = Metadata::from_json(metadata);
 
-        let redraw = metadata.file_range != self.metadata.file_range;
-
         self.metadata = metadata;
-
-
-        if redraw {
-            //dbg!(&self.metadata);
-            //self.draw();
-        }
-
-        Ok(())
+        self.draw()
     }
 
-    pub fn update_content(&mut self, content: &str) -> Result<()> {
-        let blocks = self.code_regex.captures_iter(content).map(|x| x["inner"].to_string());
+    pub fn update_content(&mut self, content: &str) -> Result<bool> {
+        let blocks = self.code_regex.captures_iter(content)
+            .map(|x| x["inner"].to_string())
+            .map(|x| (x.clone(), utils::hash(&x)));
+
         let new_lines = content.split("\n").enumerate().filter(|(_, content)| content == &"```math").map(|(idx, _)| idx+1);
+
+        let mut any_changed = false;
 
         // create mapping (Id -> Node) from cache and new nodes
         let new_blocks = blocks.zip(new_lines)
-            .map(|(a, b)| Node::new(&a, b))
-            .map(|node| node.map(|node| self.blocks.remove(&node.id).unwrap_or(node)))
+            .map(|(a, b)| self.blocks.remove(&a.1).map(|x| Ok(x))
+                .unwrap_or_else(|| { any_changed = true; Node::new(a.0, b) }))
             .map(|node| node.map(|node| (node.id.clone(), node)))
-            .collect();
+            .collect::<Result<_>>();
 
         if let Ok(new_blocks) = new_blocks {
             self.blocks = new_blocks;
-            self.block_lines = new_blocks.values().map(|x| x.line_mapping()).collect();
         } else {
             new_blocks?;
         }
 
-        //self.clear_all("");
-        self.draw();
-
-        Ok(())
+        Ok(any_changed)
     }
 }
