@@ -2,8 +2,18 @@ use std::{str, usize, io::Write};
 use std::path::Path;
 use std::fs::{self, File};
 use std::process::{Command, Stdio};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+
+pub fn hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    let mut x = format!("{:x}", &result);
+    x.truncate(24);
+    x
+}
 
 /// Generate SVG file from latex file with given zoom
 pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<()> {

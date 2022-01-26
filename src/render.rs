@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write, Stdout};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::thread;
 
 use regex::Regex;
 use tinyjson::JsonValue;
@@ -9,6 +10,7 @@ use sha2::{Digest, Sha256};
 use magick_rust::MagickWand;
 
 use crate::error::{Result, Error};
+use crate::utils;
 
 const ART_PATH: &'static str = "/tmp/nvim_arts/";
 const CHAR_HEIGHT: usize = 30;
@@ -44,10 +46,104 @@ impl Metadata {
     }
 }
 
+pub enum NodeFile {
+    Generate,
+    InMemory(MagickWand),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum NodeState {
+    Hidden,
+    UpperBorder(usize, usize),
+    LowerBorder(usize, usize),
+    Visible(usize),
+}
+
+impl NodeState {
+    pub fn from_metadata(range: (usize, usize), obj: &Metadata) -> NodeState {
+        NodeState::Hidden
+    }
+
+    pub fn should_update(&self, rhs: &NodeState) -> bool {
+        self != rhs
+    }
+}
+
+pub struct Node {
+    id: CodeId,
+    file: NodeFile,
+    range: (usize, usize),
+    state: NodeState
+}
+
+impl Node {
+    pub fn new(content: &str, line: usize) -> Result<Node> {
+        let id = utils::hash(content);
+        let range = (line, line + content.matches("\n").count());
+
+        // check if file already exists, otherwise initiate creation
+        let path = Path::new(ART_PATH).join(id).with_extension("svg");
+        let file = if !path.exists() {
+            thread::spawn(move || { crate::utils::parse_equation(&path, content, 1.0)});
+
+            NodeFile::Generate
+        } else {
+            let wand = MagickWand::new();
+            wand.set_resolution(600.0, 600.0).unwrap();
+            wand.read_image(path.to_str().unwrap()).unwrap();
+            NodeFile::InMemory(wand)
+        };
+
+        // create node, it's hidden bc. we want to render it next cycle
+        Ok(Node {
+            id, file, range, 
+            state: NodeState::Hidden
+        })
+    }
+
+    pub fn step(&self, metadata: &Metadata) -> NodeState {
+        let mut distance_upper = self.range.0 as isize - metadata.file_range.0 as isize;
+
+        let mut start = 0;
+        let mut height = self.range.1 - self.range.0;
+
+        if distance_upper < -(height as isize) {
+            // if we are above the upper line, just skip
+            return NodeState::Hidden;
+        } else if distance_upper < 0 {
+            // if we are in the upper cross-over region, calculate the visible height
+            start = (-distance_upper) as usize;
+            height -= start;
+            return NodeState::UpperBorder(start, height);
+        }
+
+        let distance_lower = metadata.viewport.1.max(metadata.file_range.1 + 1) as isize - self.range.1 as isize;
+
+        dbg!(start, height, distance_upper, distance_lower);
+
+        if distance_lower <= 0 {
+            return NodeState::Hidden;
+        } else if (distance_lower as usize) < height {
+            // remove some height if we are in the command line region
+            height -= (height as isize - distance_lower) as usize;
+            return NodeState::LowerBorder(start, height);
+        }
+
+        NodeState::Visible(start)
+    }
+    pub fn line_mapping(&self) -> ((usize, usize), CodeId) {
+        (self.range, self.id.clone())
+    }
+
+    pub fn length(&self) -> usize {
+        self.range.1 - self.range.0
+    }
+}
+
 pub struct Render {
     stdout: Stdout,
     code_regex: Regex,
-    blocks: HashMap<CodeId, (MagickWand, usize)>,
+    blocks: HashMap<CodeId, Node>,
     block_lines: BTreeMap<(usize, usize), CodeId>,
     metadata: Metadata
 }
@@ -68,6 +164,33 @@ impl Render {
     }
 
     pub fn draw(&mut self) {
+        for (id, node) in self.blocks {
+            let new_state = node.step(&self.metadata);
+            
+            let data: Option<(Vec<u8>, usize)> = match (node.file, node.state, new_state) {
+                (NodeFile::InMemory(img), NodeState::Hidden, NodeState::Visible(pos)) => {
+                    img.fit(100000, node.length() * CHAR_HEIGHT);
+                    Some((
+                        img.write_image_blob("sixel").unwrap(),
+                        pos
+                    ))
+                }, 
+                (NodeFile::InMemory(img), NodeState::Hidden, NodeState::UpperBorder(p, h) | NodeState::LowerBorder(p, h)) => {
+
+                }
+                (NodeFile::InMemory(img), NodeState::UpperBorder(p, h) | NodeState::LowerBorder(p, h), NodeState::Visible(p2)) => {
+                },
+                }
+                _ => panic!("")
+            };
+
+            if let Some((buf, pos)) = data {
+                self.stdout.write(&format!("\x1b[s\x1b[{};0H", pos+1).as_bytes()).unwrap();
+                self.stdout.write(&buf).unwrap();
+                self.stdout.write(b"\x1b[u").unwrap();
+            }
+        }
+
         // get images currently visible
         let visible_blocks = self.block_lines.iter().filter(|((line, length), _)| {
             (line + length) > self.metadata.file_range.0 as usize || 
@@ -112,9 +235,6 @@ impl Render {
                 buf = img.write_image_blob("sixel").unwrap();
             }
 
-            self.stdout.write(&format!("\x1b[s\x1b[{};0H", distance_upper+1).as_bytes()).unwrap();
-            self.stdout.write(&buf).unwrap();
-            self.stdout.write(b"\x1b[u").unwrap();
 
         }
     }
@@ -143,39 +263,19 @@ impl Render {
     }
 
     pub fn update_content(&mut self, content: &str) -> Result<()> {
-        let blocks: Vec<_> = self.code_regex.captures_iter(content).map(|x| x["inner"].to_string()).collect();
-        let new_lines: Vec<_> = content.split("\n").enumerate().filter(|(_, content)| content == &"```math").map(|(idx, _)| idx+1).collect();
+        let blocks = self.code_regex.captures_iter(content).map(|x| x["inner"].to_string());
+        let new_lines = content.split("\n").enumerate().filter(|(_, content)| content == &"```math").map(|(idx, _)| idx+1);
 
-        let blocks_hash = blocks.iter().map(|content| {
-            let mut hasher = Sha256::new();
-            hasher.update(content.as_bytes());
-            let result = hasher.finalize();
-            let mut x = format!("{:x}", &result);
-            x.truncate(24);
-            x
-        }).collect::<HashSet<_>>();
-
-        let new_blocks = blocks_hash.iter().zip(blocks.into_iter()).map(|(id, content)| {
-            if let Some(val) = self.blocks.remove(id) {
-                return Ok((id.to_string(), val));
-            }
-
-            // check that file exists
-            let path = Path::new(ART_PATH).join(id).with_extension("svg");
-            if !path.exists() {
-                crate::utils::parse_equation(&path, &content, 1.0)?;
-            }
-
-            let wand = MagickWand::new();
-            wand.set_resolution(600.0, 600.0).unwrap();
-            wand.read_image(path.to_str().unwrap()).unwrap();
-
-            Ok((id.to_string(), (wand, content.matches("\n").count()+2)))
-        }).collect::<Result<_>>();
+        // create mapping (Id -> Node) from cache and new nodes
+        let new_blocks = blocks.zip(new_lines)
+            .map(|(a, b)| Node::new(&a, b))
+            .map(|node| node.map(|node| self.blocks.remove(&node.id).unwrap_or(node)))
+            .map(|node| node.map(|node| (node.id.clone(), node)))
+            .collect();
 
         if let Ok(new_blocks) = new_blocks {
             self.blocks = new_blocks;
-            self.block_lines = new_lines.into_iter().zip(self.blocks.values()).map(|(a, b)| (a, b.1)).zip(blocks_hash.into_iter()).collect();
+            self.block_lines = new_blocks.values().map(|x| x.line_mapping()).collect();
         } else {
             new_blocks?;
         }
