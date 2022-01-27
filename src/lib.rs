@@ -1,11 +1,9 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::c_char;
 
 use std::sync::Once;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
-
-use tinyjson::JsonValue;
 
 mod error;
 mod utils;
@@ -69,6 +67,7 @@ macro_rules! export_fn {
     }
 }
 
-export_fn!(update_content,());
+export_fn!(update_content,usize);
 export_fn!(update_metadata, ());
 export_fn!(clear_all, ());
+export_fn!(draw, usize);

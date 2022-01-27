@@ -1,7 +1,7 @@
 use std::{str, usize, io::Write};
 use std::path::Path;
-use std::fs::{self, File};
-use std::process::{Command, Stdio};
+use std::fs::File;
+use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
