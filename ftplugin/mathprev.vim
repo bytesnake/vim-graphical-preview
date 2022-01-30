@@ -1,6 +1,17 @@
-source libcallex-vim/autoload/libcallex.vim
+if exists("g:loaded_math_preview")
+    finish
+endif
+let g:loaded_math_preview = 1
 
-let g:inst = libcallex#load("target/release/libvim_math.so")
+let s:path = resolve(expand('<sfile>:p:h') . "/../")
+let g:inst = libcallex#load(s:path . "/target/release/libvim_math.so")
+
+function! PrintError(msg) abort
+    execute 'normal! \<Esc>'
+    echohl ErrorMsg
+    echomsg a:msg
+    echohl None
+endfunction
 
 function! DrawInner()
     let again = g:inst.call("draw", [""], "number")
@@ -37,9 +48,7 @@ function! ClearAll()
     mode
 endfunction
 
-:autocmd TextChanged,InsertLeave * call TextChanged()
+:autocmd VimEnter,TextChanged,InsertLeave * call TextChanged()
 :autocmd VimResized * call UpdateMetadata()
 :autocmd CursorMoved * call UpdateMetadata()
 :autocmd InsertEnter * call ClearAll()
-
-:call TextChanged()
