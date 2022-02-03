@@ -1,42 +1,32 @@
 use std::io::{Write, Stdout};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::thread;
 use std::fs::File;
 use std::os::unix::io::FromRawFd;
 
 use regex::Regex;
-use tinyjson::JsonValue;
+use miniserde::{json, Serialize, Deserialize};
 use magick_rust::MagickWand;
 
 use crate::error::Result;
 use crate::utils;
+use crate::node_view::{NodeView, calculate_views};
 
 const ART_PATH: &'static str = "/tmp/nvim_arts/";
 const CHAR_HEIGHT: usize = 30;
-type CodeId = String;
 
-#[derive(Debug)]
+pub type CodeId = String;
+pub type Folds = Vec<(usize, isize)>;
+
+#[derive(Debug, Deserialize)]
 pub struct Metadata {
-    file_range: (u64, u64),
-    viewport: (u64, u64),
-    cursor: u64
+    pub file_range: (u64, u64),
+    pub viewport: (u64, u64),
+    pub cursor: u64
 }
 
 impl Metadata {
-    pub fn from_json(data: JsonValue) -> Metadata {
-        fn dec(val: &JsonValue) -> u64 {
-            let num: &f64 = val.get().unwrap();
-            *num as u64
-        }
-
-        Metadata {
-            file_range: (dec(&data["start"]), dec(&data["end"])),
-            viewport: (dec(&data["width"]), dec(&data["height"])),
-            cursor: dec(&data["cursor"]),
-        }
-    }
-
     pub fn new() -> Metadata {
         Metadata {
             file_range: (1, 1),
@@ -44,6 +34,12 @@ impl Metadata {
             cursor: 1
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RedrawState {
+    should_redraw: bool,
+    update_folding: Option<Vec<usize>>,
 }
 
 pub struct NodeFile {
@@ -70,19 +66,11 @@ impl NodeFile {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum NodeState {
-    Hidden,
-    UpperBorder(usize, usize),
-    LowerBorder(usize, usize),
-    Visible(usize, usize),
-}
-
 pub struct Node {
-    id: CodeId,
+    pub id: CodeId,
     file: NodeFile,
-    range: (usize, usize),
-    state: NodeState
+    pub range: (usize, usize),
+    state: NodeView
 }
 
 impl Node {
@@ -103,38 +91,8 @@ impl Node {
         // create node, it's hidden bc. we want to render it next cycle
         Ok(Node {
             id, file, range, 
-            state: NodeState::Hidden
+            state: NodeView::Hidden
         })
-    }
-
-    pub fn step(&self, metadata: &Metadata) -> NodeState {
-        let distance_upper = self.range.0 as isize - metadata.file_range.0 as isize;
-
-        let start;
-        let mut height = self.range.1 - self.range.0 + 1;
-
-        if distance_upper <= -(height as isize) {
-            // if we are above the upper line, just skip
-            return NodeState::Hidden;
-        } else if distance_upper < 0 {
-            // if we are in the upper cross-over region, calculate the visible height
-            start = (-distance_upper) as usize;
-            height -= start;
-            return NodeState::UpperBorder(start, height);
-        }
-
-        let distance_lower = (metadata.viewport.1).max(metadata.file_range.1) as isize - self.range.0 as isize + 1;
-
-        if distance_lower <= 0 {
-            return NodeState::Hidden;
-        } else if (distance_lower as usize) < height {
-            // remove some height if we are in the command line region
-            height -= (height as isize - distance_lower) as usize;
-            start = metadata.viewport.1 as usize - distance_lower as usize;
-            return NodeState::LowerBorder(start, height);
-        }
-
-        NodeState::Visible(distance_upper as usize, height)
     }
 
     pub fn file_available(&self) -> bool {
@@ -144,8 +102,13 @@ impl Node {
 
 pub struct Render {
     stdout: Stdout,
-    code_regex: Regex,
-    blocks: HashMap<CodeId, Node>,
+    fence_regex: Regex,
+    header_regex: Regex,
+
+    blocks: BTreeMap<CodeId, Node>,
+    ranges: BTreeMap<usize, CodeId>,
+
+    folds: Folds,
     metadata: Metadata
 }
 
@@ -157,8 +120,12 @@ impl Render {
 
         Render {
             stdout: std::io::stdout(),
-            code_regex: Regex::new(r"```math\n(?P<inner>[\s\S]+?)```").unwrap(),
-            blocks: HashMap::new(),
+            fence_regex: Regex::new(r"```math\n(?P<inner>[\s\S]+?)```").unwrap(),
+            header_regex: Regex::new(r"^(#{1,6}.*)").unwrap(),
+            blocks: BTreeMap::new(),
+            ranges: BTreeMap::new(),
+            fold_ranges: Vec::new(),
+            folds: BTreeMap::new(),
             metadata: Metadata::new(),
         }
     }
@@ -166,8 +133,10 @@ impl Render {
     pub fn draw(&mut self, _: &str) -> Result<usize> {
         let mut pending = false;
 
+        let relevant_nodes = self.relate_to_folds();
+
         for (id, node) in &mut self.blocks {
-            let new_state = node.step(&self.metadata);
+            let new_state = node.step(&self.metadata, &self.folds);
 
             // check if file is now available
             if node.file_available() && !node.file.is_available() {
@@ -177,7 +146,7 @@ impl Render {
             let img = match &node.file.file {
                 Some(file) => file,
                 None => {
-                    if new_state != NodeState::Hidden {
+                    if new_state != NodeView::Hidden {
                         pending = true;
                     }
 
@@ -188,14 +157,14 @@ impl Render {
             
             //dbg!(&node.state, &new_state);
             let data: Option<(Vec<u8>, usize)> = match (&node.state, &new_state) {
-                (NodeState::UpperBorder(_, _) | NodeState::LowerBorder(_, _) | NodeState::Hidden, NodeState::Visible(pos, _)) => {
+                (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
                     img.fit(self.metadata.viewport.0 as usize * CHAR_HEIGHT, theight * CHAR_HEIGHT);
                     Some((
                         img.write_image_blob("sixel").unwrap(),
                         *pos
                     ))
                 }, 
-                (NodeState::Hidden, NodeState::UpperBorder(y, height)) => {
+                (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
                     // clone and crop
                     let img = img.clone();
                     img.fit(100000, theight * CHAR_HEIGHT);
@@ -205,7 +174,7 @@ impl Render {
                         0
                     ))
                 },
-                (NodeState::UpperBorder(y_old, _), NodeState::UpperBorder(y, height)) if y < y_old => {
+                (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
                     // clone and crop
                     let img = img.clone();
                     img.fit(100000, theight * CHAR_HEIGHT);
@@ -215,7 +184,7 @@ impl Render {
                         0
                     ))
                 },
-                (NodeState::Hidden, NodeState::LowerBorder(pos, height)) => {
+                (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
                     // clone and crop
                     let img = img.clone();
                     img.fit(100000, theight * CHAR_HEIGHT);
@@ -225,7 +194,7 @@ impl Render {
                         *pos
                     ))
                 },
-                (NodeState::LowerBorder(_, height_old), NodeState::LowerBorder(pos, height)) if height_old < height => {
+                (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
                     // clone and crop
                     let img = img.clone();
                     img.fit(100000, theight * CHAR_HEIGHT);
@@ -243,12 +212,12 @@ impl Render {
             }
 
             if let Some((mut buf, pos)) = data {
-                let mut wbuf = format!("\x1b[s\x1b[{};0H", pos+1).into_bytes();
+                let mut wbuf = format!("\x1b[s\x1b[{};5H", pos+1).into_bytes();
                 for _ in 0..(node.range.1-node.range.0) {
                     wbuf.extend_from_slice(b"\x1b[B\x1b[K");
                 }
 
-                wbuf.append(&mut format!("\x1b[s\x1b[{};0H", pos+1).into_bytes());
+                wbuf.append(&mut format!("\x1b[s\x1b[{};5H", pos+1).into_bytes());
                 wbuf.append(&mut buf);
                 wbuf.extend_from_slice(b"\x1b[u");
 
@@ -273,33 +242,41 @@ impl Render {
 
     pub fn clear_all(&mut self, _: &str) -> Result<()> {
         for (_, node) in &mut self.blocks {
-            node.state = NodeState::Hidden;
+            node.state = NodeView::Hidden;
         }
-        //self.stdout.write(b"\x1b[2J").unwrap();
 
         Ok(())
     }
 
     pub fn update_metadata(&mut self, metadata: &str) -> Result<()> {
-        let metadata: JsonValue = metadata.parse().unwrap();
-        let metadata = Metadata::from_json(metadata);
+        eprintln!("UPDATE METADATA");
+        let metadata: Metadata = json::from_str(metadata).unwrap();
 
         self.metadata = metadata;
 
         Ok(())
     }
 
-    pub fn update_content(&mut self, content: &str) -> Result<usize> {
-        let blocks = self.code_regex.captures_iter(content)
+    pub fn update_content(&mut self, content: &str) -> Result<String> {
+        let blocks = self.fence_regex.captures_iter(content)
             .map(|x| x["inner"].to_string())
             .map(|x| (x.clone(), utils::hash(&x)));
 
-        let new_lines = content.split("\n").enumerate().filter(|(_, content)| content == &"```math").map(|(idx, _)| idx+1);
+        let mut line_fences = Vec::new();
+        let mut line_header = Vec::new();
+
+        for (i, line) in content.lines().enumerate() {
+            if line.starts_with("```math") {
+                line_fences.push(i);
+            } else if self.header_regex.is_match(line) {
+                line_header.push(i+1);
+            }
+        }
 
         let mut any_changed = false;
 
         // create mapping (Id -> Node) from cache and new nodes
-        let new_blocks = blocks.zip(new_lines)
+        let new_blocks = blocks.zip(line_fences)
             .map(|(a, b)| self.blocks.remove(&a.1)
                 .map(|mut x| {
                     let new_range = (b, b + a.0.matches("\n").count() + 1);
@@ -317,13 +294,33 @@ impl Render {
             .map(|node| node.map(|node| (node.id.clone(), node)))
             .collect::<Result<_>>();
 
-
         if let Ok(new_blocks) = new_blocks {
             self.blocks = new_blocks;
+
+            // update lines
+            let lines = new_blocks.iter().map(|(id, node)| (node.range.0, id.clone())).collect();
+            self.ranges = lines;
+
         } else {
             new_blocks?;
         }
 
-        Ok(if any_changed { 1 } else { 0 })
+        let ret = RedrawState {
+            should_redraw: any_changed,
+            update_folding: Some(line_header),
+        };
+
+        Ok(json::to_string(&ret))
+    }
+
+    pub fn set_folds(&mut self, folds: &str) -> Result<()> {
+        let folds: Folds = json::from_str(folds).unwrap();
+        self.folds = folds;
+
+        let mut offset = 0;
+        for view in calculate_views(&self.metadata, &self.folds, &self.nodes, &mut offset) {
+        }
+
+        Ok(())
     }
 }
