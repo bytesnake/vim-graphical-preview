@@ -11,7 +11,7 @@ use magick_rust::MagickWand;
 
 use crate::error::Result;
 use crate::utils;
-use crate::node_view::{NodeView, calculate_views};
+use crate::node_view::NodeView;
 
 const ART_PATH: &'static str = "/tmp/nvim_arts/";
 const CHAR_HEIGHT: usize = 30;
@@ -34,6 +34,23 @@ impl Metadata {
             cursor: 1
         }
     }
+}
+
+#[derive(PartialEq, Clone)]
+pub enum FoldState {
+    Folded(usize),
+    Open,
+}
+
+pub struct Fold {
+    offset: isize,
+    line: usize,
+    state: FoldState,
+}
+
+pub enum FoldInner {
+    Fold(Fold),
+    Node((CodeId, NodeView)),
 }
 
 #[derive(Debug, Serialize)]
@@ -70,7 +87,6 @@ pub struct Node {
     pub id: CodeId,
     file: NodeFile,
     pub range: (usize, usize),
-    state: NodeView
 }
 
 impl Node {
@@ -91,7 +107,6 @@ impl Node {
         // create node, it's hidden bc. we want to render it next cycle
         Ok(Node {
             id, file, range, 
-            state: NodeView::Hidden
         })
     }
 
@@ -106,9 +121,7 @@ pub struct Render {
     header_regex: Regex,
 
     blocks: BTreeMap<CodeId, Node>,
-    ranges: BTreeMap<usize, CodeId>,
-
-    folds: Folds,
+    strcts: BTreeMap<usize, FoldInner>,
     metadata: Metadata
 }
 
@@ -123,9 +136,7 @@ impl Render {
             fence_regex: Regex::new(r"```math\n(?P<inner>[\s\S]+?)```").unwrap(),
             header_regex: Regex::new(r"^(#{1,6}.*)").unwrap(),
             blocks: BTreeMap::new(),
-            ranges: BTreeMap::new(),
-            fold_ranges: Vec::new(),
-            folds: BTreeMap::new(),
+            strcts: BTreeMap::new(),
             metadata: Metadata::new(),
         }
     }
@@ -133,116 +144,140 @@ impl Render {
     pub fn draw(&mut self, _: &str) -> Result<usize> {
         let mut pending = false;
 
-        let relevant_nodes = self.relate_to_folds();
-
-        for (id, node) in &mut self.blocks {
-            let new_state = node.step(&self.metadata, &self.folds);
-
-            // check if file is now available
-            if node.file_available() && !node.file.is_available() {
-                node.file = NodeFile::new(&Path::new(ART_PATH).join(&id).with_extension("svg"));
+        // perform fold skipping if folded in
+        let mut skip_to = None;
+        for (line, fold) in &mut self.strcts {
+            if let Some(skip_to) = &skip_to {
+                if line <= skip_to {
+                    continue;
+                }
             }
 
-            let img = match &node.file.file {
-                Some(file) => file,
-                None => {
-                    if new_state != NodeView::Hidden {
-                        pending = true;
+            match fold {
+                FoldInner::Node((id, ref mut node_view)) => {
+                    let node = self.blocks.get_mut(id).unwrap();
+                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view)?;
+                },
+                FoldInner::Fold(ref fold) => {
+                    if let FoldState::Folded(end) =  fold.state {
+                        skip_to = Some(end);
                     }
-
-                    continue
-                }
-            };
-            let theight = node.range.1 - node.range.0 + 1;
-            
-            //dbg!(&node.state, &new_state);
-            let data: Option<(Vec<u8>, usize)> = match (&node.state, &new_state) {
-                (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
-                    img.fit(self.metadata.viewport.0 as usize * CHAR_HEIGHT, theight * CHAR_HEIGHT);
-                    Some((
-                        img.write_image_blob("sixel").unwrap(),
-                        *pos
-                    ))
-                }, 
-                (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
-                    // clone and crop
-                    let img = img.clone();
-                    img.fit(100000, theight * CHAR_HEIGHT);
-                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
-                    Some((
-                        img.write_image_blob("sixel").unwrap(),
-                        0
-                    ))
-                },
-                (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
-                    // clone and crop
-                    let img = img.clone();
-                    img.fit(100000, theight * CHAR_HEIGHT);
-                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
-                    Some((
-                        img.write_image_blob("sixel").unwrap(),
-                        0
-                    ))
-                },
-                (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
-                    // clone and crop
-                    let img = img.clone();
-                    img.fit(100000, theight * CHAR_HEIGHT);
-                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
-                    Some((
-                        img.write_image_blob("sixel").unwrap(),
-                        *pos
-                    ))
-                },
-                (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
-                    // clone and crop
-                    let img = img.clone();
-                    img.fit(100000, theight * CHAR_HEIGHT);
-                    img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
-                    Some((
-                        img.write_image_blob("sixel").unwrap(),
-                        *pos
-                    ))
-                },
-                _ => None
-            };
-
-            if node.file.is_available() {
-                node.state = new_state;
-            }
-
-            if let Some((mut buf, pos)) = data {
-                let mut wbuf = format!("\x1b[s\x1b[{};5H", pos+1).into_bytes();
-                for _ in 0..(node.range.1-node.range.0) {
-                    wbuf.extend_from_slice(b"\x1b[B\x1b[K");
-                }
-
-                wbuf.append(&mut format!("\x1b[s\x1b[{};5H", pos+1).into_bytes());
-                wbuf.append(&mut buf);
-                wbuf.extend_from_slice(b"\x1b[u");
-
-                {
-                    let outer_lock = self.stdout.lock();
-                    let mut stdout = unsafe { File::from_raw_fd(1) };
-                    let mut idx = 0;
-                    while idx < wbuf.len() {
-                        match stdout.write(&wbuf[idx..]) {
-                            Ok(n) => idx += n,
-                            Err(err) => {eprintln!("{}", err);},
-                        }
-                    }
-                    std::mem::forget(stdout);
-                    drop(outer_lock);
                 }
             }
         }
 
         Ok(if pending { 1 } else { 0 })
+
+    }
+
+    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView) -> Result<bool> {
+        // check if file is now available
+        if node.file_available() && !node.file.is_available() {
+           node.file = NodeFile::new(&Path::new(ART_PATH).join(&node.id).with_extension("svg"));
+        }
+
+        let img = match &node.file.file {
+            Some(file) => file,
+            None => {
+                if view != &NodeView::Hidden {
+                    return Ok(true);
+                } else {
+                    return Ok(false);
+                }
+            }
+        };
+        let theight = node.range.1 - node.range.0 + 1;
+        
+        let new_view = NodeView::new(node,  &metadata, 0);
+        //dbg!(&node.state, &new_state);
+        let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
+            (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
+                img.fit(metadata.viewport.0 as usize * CHAR_HEIGHT, theight * CHAR_HEIGHT);
+                Some((
+                    img.write_image_blob("sixel").unwrap(),
+                    *pos
+                ))
+            }, 
+            (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
+                // clone and crop
+                let img = img.clone();
+                img.fit(100000, theight * CHAR_HEIGHT);
+                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
+                Some((
+                    img.write_image_blob("sixel").unwrap(),
+                    0
+                ))
+            },
+            (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
+                // clone and crop
+                let img = img.clone();
+                img.fit(100000, theight * CHAR_HEIGHT);
+                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
+                Some((
+                    img.write_image_blob("sixel").unwrap(),
+                    0
+                ))
+            },
+            (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
+                // clone and crop
+                let img = img.clone();
+                img.fit(100000, theight * CHAR_HEIGHT);
+                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
+                Some((
+                    img.write_image_blob("sixel").unwrap(),
+                    *pos
+                ))
+            },
+            (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
+                // clone and crop
+                let img = img.clone();
+                img.fit(100000, theight * CHAR_HEIGHT);
+                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
+                Some((
+                    img.write_image_blob("sixel").unwrap(),
+                    *pos
+                ))
+            },
+            _ => None
+        };
+
+        if node.file.is_available() {
+            *view = new_view;
+        }
+
+        if let Some((mut buf, pos)) = data {
+            let mut wbuf = format!("\x1b[s\x1b[{};5H", pos+1).into_bytes();
+            for _ in 0..(node.range.1-node.range.0) {
+                wbuf.extend_from_slice(b"\x1b[B\x1b[K");
+            }
+
+            wbuf.append(&mut format!("\x1b[s\x1b[{};5H", pos+1).into_bytes());
+            wbuf.append(&mut buf);
+            wbuf.extend_from_slice(b"\x1b[u");
+
+            {
+                let outer_lock = stdout.lock();
+                let mut stdout = unsafe { File::from_raw_fd(1) };
+                let mut idx = 0;
+                while idx < wbuf.len() {
+                    match stdout.write(&wbuf[idx..]) {
+                        Ok(n) => idx += n,
+                        Err(err) => {eprintln!("{}", err);},
+                    }
+                }
+                std::mem::forget(stdout);
+                drop(outer_lock);
+            }
+        }
+
+        Ok(false)
     }
 
     pub fn clear_all(&mut self, _: &str) -> Result<()> {
-        for (_, node) in &mut self.blocks {
-            node.state = NodeView::Hidden;
+        for (_, fold) in &mut self.strcts {
+            if let FoldInner::Node(ref mut node) = fold {
+                node.1 = NodeView::Hidden;
+            }
         }
 
         Ok(())
@@ -258,56 +293,62 @@ impl Render {
     }
 
     pub fn update_content(&mut self, content: &str) -> Result<String> {
-        let blocks = self.fence_regex.captures_iter(content)
+        let mut blocks = self.fence_regex.captures_iter(content)
             .map(|x| x["inner"].to_string())
             .map(|x| (x.clone(), utils::hash(&x)));
 
-        let mut line_fences = Vec::new();
-        let mut line_header = Vec::new();
-
-        for (i, line) in content.lines().enumerate() {
-            if line.starts_with("```math") {
-                line_fences.push(i);
-            } else if self.header_regex.is_match(line) {
-                line_header.push(i+1);
-            }
-        }
+        // collect line numbers of code fences and section headers into b tree
+        let lines = content.lines().enumerate()
+            .filter_map(|(id, line)| match (line.starts_with("```math"), self.header_regex.is_match(line)) {
+                (true, false) => Some((id, true)),
+                (false, true) => Some((id, false)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let mut any_changed = false;
 
+        // TODO collect into two separate lists, all nodes and structure of file
         // create mapping (Id -> Node) from cache and new nodes
-        let new_blocks = blocks.zip(line_fences)
-            .map(|(a, b)| self.blocks.remove(&a.1)
-                .map(|mut x| {
-                    let new_range = (b, b + a.0.matches("\n").count() + 1);
+        let mut nodes = BTreeMap::new();
+        let mut strct = BTreeMap::new();
+        for (line, is_math) in &lines {
+            if *is_math {
+                let (content, id) = blocks.next().unwrap();
 
-                    if new_range != x.range {
-                        any_changed = true
+                let new_range = (*line, *line + content.matches("\n").count() + 1);
+
+                // try to load from existing structures
+                if let Some(mut node) = self.blocks.remove(&id) {
+                    if new_range != node.range {
+                        any_changed = true;
                     }
+                    node.range = new_range;
 
-                    x.range = new_range;
+                    nodes.insert(id.clone(), node);
+                } else {
+                    any_changed = true;
 
-                    Ok(x)
-                })
-                .unwrap_or_else(|| { any_changed = true; Node::new(a.0, b) })
-            )
-            .map(|node| node.map(|node| (node.id.clone(), node)))
-            .collect::<Result<_>>();
+                    nodes.insert(id.clone(), Node::new(content, *line)?);
+                }
 
-        if let Ok(new_blocks) = new_blocks {
-            self.blocks = new_blocks;
-
-            // update lines
-            let lines = new_blocks.iter().map(|(id, node)| (node.range.0, id.clone())).collect();
-            self.ranges = lines;
-
-        } else {
-            new_blocks?;
+                strct.insert(*line, FoldInner::Node((id, NodeView::Hidden)));
+            } else {
+                let new_fold = Fold {
+                    offset: 0,
+                    state: FoldState::Open,
+                    line: *line,
+                };
+                strct.insert(*line, FoldInner::Fold(new_fold));
+            }
         }
+
+        self.blocks = nodes;
+        self.strcts = strct;
 
         let ret = RedrawState {
             should_redraw: any_changed,
-            update_folding: Some(line_header),
+            update_folding: Some(lines.into_iter().filter(|x| !x.1).map(|x| x.0).collect()),
         };
 
         Ok(json::to_string(&ret))
@@ -315,10 +356,33 @@ impl Render {
 
     pub fn set_folds(&mut self, folds: &str) -> Result<()> {
         let folds: Folds = json::from_str(folds).unwrap();
-        self.folds = folds;
+        let mut folds = folds.into_iter();
 
-        let mut offset = 0;
-        for view in calculate_views(&self.metadata, &self.folds, &self.nodes, &mut offset) {
+        let mut any_changed = false;
+
+        // loop through structs and update fold information
+        for (line, elm) in &mut self.strcts {
+            match elm {
+                FoldInner::Fold(ref mut fold) => {
+                    let (start, end) = folds.next().unwrap();
+                    let prev = fold.state.clone();
+
+                    if end == -1 {
+                        fold.state = FoldState::Open;
+                    } else {
+                        fold.state = FoldState::Folded(end as usize);
+                    }
+
+                    if prev != fold.state {
+                        any_changed = true;
+                    }
+                },
+                _ => {}
+            }
+        }
+
+        // re-calculate 
+        if any_changed {
         }
 
         Ok(())
