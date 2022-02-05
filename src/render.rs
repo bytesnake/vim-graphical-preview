@@ -43,7 +43,6 @@ pub enum FoldState {
 }
 
 pub struct Fold {
-    offset: isize,
     line: usize,
     state: FoldState,
 }
@@ -51,6 +50,22 @@ pub struct Fold {
 pub enum FoldInner {
     Fold(Fold),
     Node((CodeId, NodeView)),
+}
+
+impl FoldInner {
+    pub fn is_in_view(&self, metadata: &Metadata, blocks: &BTreeMap<CodeId, Node>) -> bool {
+        match self {
+            FoldInner::Node((id, _)) => {
+                let range = blocks.get(id).unwrap().range;
+        
+                range.1 as u64 >= metadata.viewport.0 &&
+                    range.0 as u64 <= metadata.viewport.1
+            },
+            FoldInner::Fold(ref fold) => 
+                fold.line as u64 >= metadata.viewport.0 &&
+                    fold.line as u64 <= metadata.viewport.1
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -144,51 +159,76 @@ impl Render {
     pub fn draw(&mut self, _: &str) -> Result<usize> {
         let mut pending = false;
 
+        // mutable iterator of items, skipping things outside the viewport
+        let mut items = self.strcts.iter_mut()
+            .filter(|(_, item)| item.is_in_view(&self.metadata, &self.blocks))
+            .collect::<Vec<_>>();
+
+        // initialize current item
+        let mut iter = items.iter_mut();
+        let mut item = iter.next().unwrap();
+
+        // initialize last line and top offset, so that first iteration gives offset to first item
+        let mut last_line = self.metadata.viewport.0 as usize;
+        let mut top_offset: isize = 0;
+    
         // perform fold skipping if folded in
         let mut skip_to = None;
-        for (line, fold) in &mut self.strcts {
-            if let Some(skip_to) = &skip_to {
-                if line <= skip_to {
+        loop {
+            let (line, ref mut node) = &mut item;
+
+            if let Some(skip_line) = skip_to.take() {
+                if **line <= skip_line {
+                    skip_to = Some(skip_line);
                     continue;
                 }
             }
 
-            match fold {
+            match node {
                 FoldInner::Node((id, ref mut node_view)) => {
                     let node = self.blocks.get_mut(id).unwrap();
-                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view)?;
+
+                    // calculate new offset (this can be negative at the beginning)
+                    top_offset += last_line as isize - node.range.0 as isize;
+                    last_line = node.range.1 + 1;
+
+                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset)?;
                 },
                 FoldInner::Fold(ref fold) => {
                     if let FoldState::Folded(end) =  fold.state {
                         skip_to = Some(end);
+                        
+                        // offset has a header of single line
+                        top_offset += 1;
+                        last_line = end + 1;
                     }
                 }
             }
+
+            item = match iter.next() {
+                Some(x) => x,
+                None => break
+            };
         }
 
         Ok(if pending { 1 } else { 0 })
-
     }
 
-    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView) -> Result<bool> {
+    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize) -> Result<bool> {
         // check if file is now available
         if node.file_available() && !node.file.is_available() {
            node.file = NodeFile::new(&Path::new(ART_PATH).join(&node.id).with_extension("svg"));
         }
 
+        let new_view = NodeView::new(node,  &metadata, top_offset);
         let img = match &node.file.file {
             Some(file) => file,
             None => {
-                if view != &NodeView::Hidden {
-                    return Ok(true);
-                } else {
-                    return Ok(false);
-                }
+                return Ok(new_view.is_visible());
             }
         };
         let theight = node.range.1 - node.range.0 + 1;
         
-        let new_view = NodeView::new(node,  &metadata, 0);
         //dbg!(&node.state, &new_state);
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
@@ -293,6 +333,7 @@ impl Render {
     }
 
     pub fn update_content(&mut self, content: &str) -> Result<String> {
+        // content of code fences starting with ```math
         let mut blocks = self.fence_regex.captures_iter(content)
             .map(|x| x["inner"].to_string())
             .map(|x| (x.clone(), utils::hash(&x)));
@@ -335,7 +376,6 @@ impl Render {
                 strct.insert(*line, FoldInner::Node((id, NodeView::Hidden)));
             } else {
                 let new_fold = Fold {
-                    offset: 0,
                     state: FoldState::Open,
                     line: *line,
                 };
@@ -354,7 +394,7 @@ impl Render {
         Ok(json::to_string(&ret))
     }
 
-    pub fn set_folds(&mut self, folds: &str) -> Result<()> {
+    pub fn set_folds(&mut self, folds: &str) -> Result<usize> {
         let folds: Folds = json::from_str(folds).unwrap();
         let mut folds = folds.into_iter();
 
@@ -365,6 +405,8 @@ impl Render {
             match elm {
                 FoldInner::Fold(ref mut fold) => {
                     let (start, end) = folds.next().unwrap();
+                    assert!(*line == start);
+
                     let prev = fold.state.clone();
 
                     if end == -1 {
@@ -381,10 +423,6 @@ impl Render {
             }
         }
 
-        // re-calculate 
-        if any_changed {
-        }
-
-        Ok(())
+        Ok(if any_changed { 1 } else { 0 })
     }
 }
