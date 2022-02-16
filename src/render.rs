@@ -14,7 +14,6 @@ use crate::utils;
 use crate::node_view::NodeView;
 
 const ART_PATH: &'static str = "/tmp/nvim_arts/";
-const CHAR_HEIGHT: usize = 30;
 
 pub type CodeId = String;
 pub type Folds = Vec<(usize, isize)>;
@@ -36,17 +35,19 @@ impl Metadata {
     }
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum FoldState {
     Folded(usize),
     Open,
 }
 
+#[derive(Debug)]
 pub struct Fold {
     line: usize,
     state: FoldState,
 }
 
+#[derive(Debug)]
 pub enum FoldInner {
     Fold(Fold),
     Node((CodeId, NodeView)),
@@ -58,12 +59,12 @@ impl FoldInner {
             FoldInner::Node((id, _)) => {
                 let range = blocks.get(id).unwrap().range;
         
-                range.1 as u64 >= metadata.viewport.0 &&
-                    range.0 as u64 <= metadata.viewport.1
+                range.1 as u64 >= metadata.file_range.0 &&
+                    range.0 as u64 <= metadata.file_range.1
             },
             FoldInner::Fold(ref fold) => 
-                fold.line as u64 >= metadata.viewport.0 &&
-                    fold.line as u64 <= metadata.viewport.1
+                fold.line as u64 >= metadata.file_range.0 &&
+                    fold.line as u64 <= metadata.file_range.1
         }
     }
 }
@@ -148,7 +149,7 @@ impl Render {
 
         Render {
             stdout: std::io::stdout(),
-            fence_regex: Regex::new(r"```math\n(?P<inner>[\s\S]+?)```").unwrap(),
+            fence_regex: Regex::new(r"```math(,height=(?P<height>[\d]+?))?\n(?P<inner>[\s\S]+?)```").unwrap(),
             header_regex: Regex::new(r"^(#{1,6}.*)").unwrap(),
             blocks: BTreeMap::new(),
             strcts: BTreeMap::new(),
@@ -166,33 +167,29 @@ impl Render {
 
         // initialize current item
         let mut iter = items.iter_mut();
-        let mut item = iter.next().unwrap();
+        let mut item = match iter.next() {
+            Some(x) => x,
+            None => return Ok(0)
+        };
 
         // initialize last line and top offset, so that first iteration gives offset to first item
-        let mut last_line = self.metadata.viewport.0 as usize;
+        let mut last_line = self.metadata.file_range.0 as usize;
         let mut top_offset: isize = 0;
     
+        let char_height = utils::char_pixel_height();
+
         // perform fold skipping if folded in
         let mut skip_to = None;
-        loop {
-            let (line, ref mut node) = &mut item;
-
-            if let Some(skip_line) = skip_to.take() {
-                if **line <= skip_line {
-                    skip_to = Some(skip_line);
-                    continue;
-                }
-            }
-
-            match node {
+        'outer: loop {
+            match item.1 {
                 FoldInner::Node((id, ref mut node_view)) => {
                     let node = self.blocks.get_mut(id).unwrap();
 
                     // calculate new offset (this can be negative at the beginning)
-                    top_offset += last_line as isize - node.range.0 as isize;
-                    last_line = node.range.1 + 1;
+                    top_offset += node.range.0 as isize - last_line as isize;
+                    last_line = node.range.0;
 
-                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset)?;
+                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset, char_height)?;
                 },
                 FoldInner::Fold(ref fold) => {
                     if let FoldState::Folded(end) =  fold.state {
@@ -205,16 +202,29 @@ impl Render {
                 }
             }
 
-            item = match iter.next() {
-                Some(x) => x,
-                None => break
-            };
+            // get new items and skip until line is reached
+            loop {
+                item = match iter.next() {
+                    Some(x) => x,
+                    None => break 'outer
+                };
+
+                if let Some(skip_line) = skip_to.take() {
+                    if *item.0 <= skip_line {
+                        skip_to = Some(skip_line);
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
         }
 
         Ok(if pending { 1 } else { 0 })
     }
 
-    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize) -> Result<bool> {
+    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize, char_height: usize) -> Result<bool> {
         // check if file is now available
         if node.file_available() && !node.file.is_available() {
            node.file = NodeFile::new(&Path::new(ART_PATH).join(&node.id).with_extension("svg"));
@@ -232,7 +242,7 @@ impl Render {
         //dbg!(&node.state, &new_state);
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
-                img.fit(metadata.viewport.0 as usize * CHAR_HEIGHT, theight * CHAR_HEIGHT);
+                img.fit(metadata.viewport.0 as usize * char_height, theight * char_height);
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     *pos
@@ -241,8 +251,8 @@ impl Render {
             (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
                 // clone and crop
                 let img = img.clone();
-                img.fit(100000, theight * CHAR_HEIGHT);
-                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
+                img.fit(100000, theight * char_height);
+                img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     0
@@ -251,8 +261,8 @@ impl Render {
             (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
                 // clone and crop
                 let img = img.clone();
-                img.fit(100000, theight * CHAR_HEIGHT);
-                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, (y * CHAR_HEIGHT) as isize).unwrap();
+                img.fit(100000, theight * char_height);
+                img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     0
@@ -261,8 +271,8 @@ impl Render {
             (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
                 // clone and crop
                 let img = img.clone();
-                img.fit(100000, theight * CHAR_HEIGHT);
-                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
+                img.fit(100000, theight * char_height);
+                img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     *pos
@@ -271,8 +281,8 @@ impl Render {
             (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
                 // clone and crop
                 let img = img.clone();
-                img.fit(100000, theight * CHAR_HEIGHT);
-                img.crop_image(img.get_image_width(), height * CHAR_HEIGHT, 0, 0).unwrap();
+                img.fit(100000, theight * char_height);
+                img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     *pos
@@ -324,7 +334,6 @@ impl Render {
     }
 
     pub fn update_metadata(&mut self, metadata: &str) -> Result<()> {
-        eprintln!("UPDATE METADATA");
         let metadata: Metadata = json::from_str(metadata).unwrap();
 
         self.metadata = metadata;
@@ -335,8 +344,8 @@ impl Render {
     pub fn update_content(&mut self, content: &str) -> Result<String> {
         // content of code fences starting with ```math
         let mut blocks = self.fence_regex.captures_iter(content)
-            .map(|x| x["inner"].to_string())
-            .map(|x| (x.clone(), utils::hash(&x)));
+            .map(|x| (x.name("height").and_then(|x| x.as_str().parse::<usize>().ok()), x["inner"].to_string()))
+            .map(|x| (x.0, x.1.clone(), utils::hash(&x.1)));
 
         // collect line numbers of code fences and section headers into b tree
         let lines = content.lines().enumerate()
@@ -345,19 +354,22 @@ impl Render {
                 (false, true) => Some((id, false)),
                 _ => None,
             })
+        .map(|(line, item)| (line+1, item))
             .collect::<BTreeMap<_, _>>();
 
         let mut any_changed = false;
 
-        // TODO collect into two separate lists, all nodes and structure of file
         // create mapping (Id -> Node) from cache and new nodes
         let mut nodes = BTreeMap::new();
         let mut strct = BTreeMap::new();
         for (line, is_math) in &lines {
             if *is_math {
-                let (content, id) = blocks.next().unwrap();
+                let (height, content, id) = blocks.next().unwrap();
 
-                let new_range = (*line, *line + content.matches("\n").count() + 1);
+                let height = height.unwrap_or_else(|| content.matches("\n").count() + 1);
+                let new_range = (*line, *line + height);
+
+                dbg!(&new_range);
 
                 // try to load from existing structures
                 if let Some(mut node) = self.blocks.remove(&id) {
@@ -401,7 +413,14 @@ impl Render {
         let mut any_changed = false;
 
         // loop through structs and update fold information
+        let mut end_fold: Option<usize> = None;
         for (line, elm) in &mut self.strcts {
+            if let Some(tmp) = &end_fold {
+                if tmp < line {
+                    end_fold = None;
+                }
+            }
+
             match elm {
                 FoldInner::Fold(ref mut fold) => {
                     let (start, end) = folds.next().unwrap();
@@ -413,13 +432,23 @@ impl Render {
                         fold.state = FoldState::Open;
                     } else {
                         fold.state = FoldState::Folded(end as usize);
+
+                        if prev == FoldState::Open {
+                            end_fold = Some(end as usize);
+                        }
                     }
 
                     if prev != fold.state {
                         any_changed = true;
                     }
                 },
-                _ => {}
+                FoldInner::Node((_, ref mut view)) => {
+                    if let Some(tmp) = &end_fold {
+                        if line < tmp {
+                            *view = NodeView::Hidden;
+                        }
+                    }
+                }
             }
         }
 

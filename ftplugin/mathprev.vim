@@ -46,7 +46,10 @@ function! s:UpdateFolds()
     for lnum in s:folds
         call add(l:folding_state, [lnum, foldclosedend(lnum)])
     endfor
-    call s:inst.call("set_folds", [json_encode(folding_state)], "")
+    let any_changed =  s:inst.call("set_folds", [json_encode(folding_state)], "")
+    if any_changed
+        call Draw()
+    endif
 endfunction
 
 function! s:TextChanged()

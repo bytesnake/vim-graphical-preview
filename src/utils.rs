@@ -3,6 +3,7 @@ use std::path::Path;
 use std::fs::File;
 use std::process::Command;
 use sha2::{Digest, Sha256};
+use nix::{ioctl_read_bad, pty::Winsize};
 
 use crate::error::{Error, Result};
 
@@ -13,6 +14,27 @@ pub fn hash(input: &str) -> String {
     let mut x = format!("{:x}", &result);
     x.truncate(24);
     x
+}
+
+/// Get pixel height of a character
+pub fn char_pixel_height() -> usize {
+    ioctl_read_bad! { tiocgwinsz, 21523, Winsize }
+
+    let mut size = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0
+    };
+
+    unsafe {tiocgwinsz(0, &mut size).unwrap() };
+
+    dbg!(&size);
+    if size.ws_ypixel > 2 {
+        size.ws_ypixel as usize / size.ws_row as usize
+    } else {
+        28
+    }
 }
 
 /// Generate SVG file from latex file with given zoom
