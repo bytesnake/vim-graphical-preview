@@ -31,10 +31,16 @@ function! Draw()
 endfunction
 
 function! s:UpdateMetadata()
+    let winpos = win_screenpos("0")
+    if exists('&number')
+        let winpos[1] += &numberwidth
+    endif
+
     let metadata = {
        \'file_range': [line("w0"), line("w$") - &cmdheight + 1],
        \'viewport': [&lines - &cmdheight - 1, &columns],
-       \'cursor': getcurpos()[1]
+       \'cursor': getcurpos()[1],
+       \'winpos': winpos
        \}
 
     call s:inst.call("update_metadata", [json_encode(metadata)], "")

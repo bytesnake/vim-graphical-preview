@@ -22,7 +22,8 @@ pub type Folds = Vec<(usize, isize)>;
 pub struct Metadata {
     pub file_range: (u64, u64),
     pub viewport: (u64, u64),
-    pub cursor: u64
+    pub cursor: u64,
+    pub winpos: (usize, usize),
 }
 
 impl Metadata {
@@ -30,7 +31,8 @@ impl Metadata {
         Metadata {
             file_range: (1, 1),
             viewport: (1, 1),
-            cursor: 1
+            cursor: 1,
+            winpos: (1, 1),
         }
     }
 }
@@ -227,6 +229,7 @@ impl Render {
            node.file = NodeFile::new(&Path::new(ART_PATH).join(&node.id).with_extension("svg"));
         }
 
+        dbg!(&metadata);
         let new_view = NodeView::new(node,  &metadata, top_offset);
         let img = match &node.file.file {
             Some(file) => file,
@@ -295,12 +298,12 @@ impl Render {
         }
 
         if let Some((mut buf, pos)) = data {
-            let mut wbuf = format!("\x1b[s\x1b[{};5H", pos).into_bytes();
-            for _ in 0..(node.range.1-node.range.0) {
+            let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();
+            for _ in 0..(node.range.1-node.range.0 - 1) {
                 wbuf.extend_from_slice(b"\x1b[B\x1b[K");
             }
 
-            wbuf.append(&mut format!("\x1b[{};5H", pos+1).into_bytes());
+            wbuf.append(&mut format!("\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes());
             wbuf.append(&mut buf);
             wbuf.extend_from_slice(b"\x1b[u");
 
