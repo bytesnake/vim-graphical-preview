@@ -106,10 +106,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(content: String, line: usize) -> Result<Node> {
-        let id = utils::hash(&content);
-        let range = (line, line + content.matches("\n").count() + 1);
-
+    pub fn new(id: CodeId, content: String, range: (usize, usize)) -> Result<Node> {
         let path = Path::new(ART_PATH).join(&id).with_extension("svg");
         let file = NodeFile::new(&path);
         if !file.is_available() {
@@ -237,12 +234,14 @@ impl Render {
                 return Ok(new_view.is_visible());
             }
         };
-        let theight = node.range.1 - node.range.0 + 1;
+        let theight = node.range.1 - node.range.0;
         
         //dbg!(&node.state, &new_state);
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
-                img.fit(metadata.viewport.0 as usize * char_height, theight * char_height);
+                // clone and fit
+                let img = img.clone();
+                img.fit(100000, theight * char_height);
                 Some((
                     img.write_image_blob("sixel").unwrap(),
                     *pos
@@ -296,12 +295,12 @@ impl Render {
         }
 
         if let Some((mut buf, pos)) = data {
-            let mut wbuf = format!("\x1b[s\x1b[{};5H", pos+1).into_bytes();
+            let mut wbuf = format!("\x1b[s\x1b[{};5H", pos).into_bytes();
             for _ in 0..(node.range.1-node.range.0) {
                 wbuf.extend_from_slice(b"\x1b[B\x1b[K");
             }
 
-            wbuf.append(&mut format!("\x1b[s\x1b[{};5H", pos+1).into_bytes());
+            wbuf.append(&mut format!("\x1b[{};5H", pos+1).into_bytes());
             wbuf.append(&mut buf);
             wbuf.extend_from_slice(b"\x1b[u");
 
@@ -369,8 +368,6 @@ impl Render {
                 let height = height.unwrap_or_else(|| content.matches("\n").count() + 1);
                 let new_range = (*line, *line + height);
 
-                dbg!(&new_range);
-
                 // try to load from existing structures
                 if let Some(mut node) = self.blocks.remove(&id) {
                     if new_range != node.range {
@@ -382,7 +379,7 @@ impl Render {
                 } else {
                     any_changed = true;
 
-                    nodes.insert(id.clone(), Node::new(content, *line)?);
+                    nodes.insert(id.clone(), Node::new(id.clone(), content, new_range)?);
                 }
 
                 strct.insert(*line, FoldInner::Node((id, NodeView::Hidden)));
