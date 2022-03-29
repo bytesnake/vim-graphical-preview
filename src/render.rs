@@ -161,7 +161,18 @@ impl Render {
 
         // mutable iterator of items, skipping things outside the viewport
         let mut items = self.strcts.iter_mut()
-            .filter(|(_, item)| item.is_in_view(&self.metadata, &self.blocks))
+            .map(|(a, item)| {
+                if !item.is_in_view(&self.metadata, &self.blocks) {
+                    if let FoldInner::Node((_, ref mut view)) = item {
+                        *view = NodeView::Hidden;
+                    }
+                }
+
+                (a, item)
+            })
+            .filter(|(_, item)| {
+                item.is_in_view(&self.metadata, &self.blocks)
+            })
             .collect::<Vec<_>>();
 
         // initialize current item
@@ -225,7 +236,6 @@ impl Render {
 
         Ok(if pending { 1 } else { 0 })
     }
-
     pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize, char_height: usize) -> Result<bool> {
         // check if file is now available
         if node.file_available() && !node.file.is_available() {
@@ -315,7 +325,7 @@ impl Render {
                 while idx < wbuf.len() {
                     match stdout.write(&wbuf[idx..]) {
                         Ok(n) => idx += n,
-                        Err(err) => {eprintln!("{}", err);},
+                        Err(_) => {/*eprintln!("{}", err);*/},
                     }
                 }
                 std::mem::forget(stdout);
