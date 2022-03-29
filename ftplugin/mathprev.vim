@@ -48,6 +48,7 @@ function! s:UpdateMetadata()
 endfunction
 
 function! s:UpdateFolds()
+    call s:UpdateMetadata()
     let l:folding_state = []
     for lnum in s:folds
         call add(l:folding_state, [lnum, foldclosedend(lnum)])

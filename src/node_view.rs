@@ -23,14 +23,16 @@ impl NodeView {
             return NodeView::UpperBorder(start, height);
         }
 
-        let distance_lower = (metadata.viewport.1).max(metadata.file_range.1) as isize - node.range.0 as isize + 1;
+        let distance_lower = metadata.viewport.0 as isize - offset;
+
+        //dbg!(&offset, &height, &distance_lower);
 
         if distance_lower <= 0 {
             return NodeView::Hidden;
         } else if (distance_lower as usize) < height {
             // remove some height if we are in the command line region
             height -= (height as isize - distance_lower) as usize;
-            start = metadata.viewport.1 as usize - distance_lower as usize;
+            start = offset as usize;
             return NodeView::LowerBorder(start, height);
         }
 

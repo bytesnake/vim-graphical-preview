@@ -29,7 +29,6 @@ pub fn char_pixel_height() -> usize {
 
     unsafe {tiocgwinsz(0, &mut size).unwrap() };
 
-    dbg!(&size);
     if size.ws_ypixel > 2 {
         size.ws_ypixel as usize / size.ws_row as usize
     } else {

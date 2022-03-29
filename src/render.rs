@@ -148,7 +148,7 @@ impl Render {
 
         Render {
             stdout: std::io::stdout(),
-            fence_regex: Regex::new(r"```math(,height=(?P<height>[\d]+?))?\n(?P<inner>[\s\S]+?)```").unwrap(),
+            fence_regex: Regex::new(r"```math(,height=(?P<height>[\d]+?))?[\w]*\n(?P<inner>[\s\S]+?)?```").unwrap(),
             header_regex: Regex::new(r"^(#{1,6}.*)").unwrap(),
             blocks: BTreeMap::new(),
             strcts: BTreeMap::new(),
@@ -191,12 +191,15 @@ impl Render {
                     pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset, char_height)?;
                 },
                 FoldInner::Fold(ref fold) => {
+                    // offset has a header of single line
+                    top_offset += fold.line as isize - last_line as isize;
+
                     if let FoldState::Folded(end) =  fold.state {
                         skip_to = Some(end);
                         
-                        // offset has a header of single line
-                        top_offset += 1;
-                        last_line = end + 1;
+                        last_line = end;
+                    } else {
+                        last_line = fold.line;
                     }
                 }
             }
@@ -229,7 +232,6 @@ impl Render {
            node.file = NodeFile::new(&Path::new(ART_PATH).join(&node.id).with_extension("svg"));
         }
 
-        dbg!(&metadata);
         let new_view = NodeView::new(node,  &metadata, top_offset);
         let img = match &node.file.file {
             Some(file) => file,
@@ -238,8 +240,7 @@ impl Render {
             }
         };
         let theight = node.range.1 - node.range.0;
-        
-        //dbg!(&node.state, &new_state);
+
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
                 // clone and fit
@@ -299,11 +300,11 @@ impl Render {
 
         if let Some((mut buf, pos)) = data {
             let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();
-            for _ in 0..(node.range.1-node.range.0 - 1) {
-                wbuf.extend_from_slice(b"\x1b[B\x1b[K");
-            }
+            //for _ in 0..(node.range.1-node.range.0 - 1) {
+            //    wbuf.extend_from_slice(b"\x1b[B\x1b[K");
+            //}
 
-            wbuf.append(&mut format!("\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes());
+            //wbuf.append(&mut format!("\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes());
             wbuf.append(&mut buf);
             wbuf.extend_from_slice(b"\x1b[u");
 
@@ -346,12 +347,12 @@ impl Render {
     pub fn update_content(&mut self, content: &str) -> Result<String> {
         // content of code fences starting with ```math
         let mut blocks = self.fence_regex.captures_iter(content)
-            .map(|x| (x.name("height").and_then(|x| x.as_str().parse::<usize>().ok()), x["inner"].to_string()))
+            .map(|x| (x.name("height").and_then(|x| x.as_str().parse::<usize>().ok()), x.name("inner").map_or("", |x| x.as_str())))
             .map(|x| (x.0, x.1.clone(), utils::hash(&x.1)));
 
         // collect line numbers of code fences and section headers into b tree
         let lines = content.lines().enumerate()
-            .filter_map(|(id, line)| match (line.starts_with("```math"), self.header_regex.is_match(line)) {
+            .filter_map(|(id, line)| match (line.starts_with("```math,height=") || line == "```math", self.header_regex.is_match(line)) {
                 (true, false) => Some((id, true)),
                 (false, true) => Some((id, false)),
                 _ => None,
@@ -367,6 +368,9 @@ impl Render {
         for (line, is_math) in &lines {
             if *is_math {
                 let (height, content, id) = blocks.next().unwrap();
+                if content.is_empty() {
+                    continue
+                }
 
                 let height = height.unwrap_or_else(|| content.matches("\n").count() + 1);
                 let new_range = (*line, *line + height);
@@ -382,7 +386,7 @@ impl Render {
                 } else {
                     any_changed = true;
 
-                    nodes.insert(id.clone(), Node::new(id.clone(), content, new_range)?);
+                    nodes.insert(id.clone(), Node::new(id.clone(), content.into(), new_range)?);
                 }
 
                 strct.insert(*line, FoldInner::Node((id, NodeView::Hidden)));
