@@ -40,7 +40,8 @@ function! s:UpdateMetadata()
        \'file_range': [line("w0"), line("w$") - &cmdheight + 1],
        \'viewport': [&lines - &cmdheight - 1, &columns],
        \'cursor': getcurpos()[1],
-       \'winpos': winpos
+       \'winpos': winpos,
+       \'char_height': 0,
        \}
 
     call s:inst.call("update_metadata", [json_encode(metadata)], "")
@@ -83,7 +84,7 @@ endfunction
 :autocmd CursorMoved * call <SID>UpdateMetadata()
 :autocmd InsertEnter * call <SID>ClearAll()
 
-nmap zo :foldopen<CR>:call <SID>UpdateFolds()<CR>
-nmap zc :foldclose<CR>:call <SID>UpdateFolds()<CR>
-nmap zO :foldopen!<CR>:call <SID>UpdateFolds()<CR>
-nmap zC :foldclose!<CR>:call <SID>UpdateFolds()<CR>
+map zo :foldopen<CR>:call <SID>UpdateFolds()<CR>
+map zc :foldclose<CR>:call <SID>UpdateFolds()<CR>
+map zO :foldopen!<CR>:call <SID>UpdateFolds()<CR>
+map zC :foldclose!<CR>:call <SID>UpdateFolds()<CR>
