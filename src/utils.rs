@@ -1,11 +1,12 @@
 use std::{str, usize, io::Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::process::Command;
 use sha2::{Digest, Sha256};
 use nix::{ioctl_read_bad, pty::Winsize};
 
 use crate::error::{Error, Result};
+use crate::render::ART_PATH;
 
 pub fn hash(input: &str) -> String {
     let mut hasher = Sha256::new();
@@ -37,7 +38,7 @@ pub fn char_pixel_height() -> usize {
 }
 
 /// Generate SVG file from latex file with given zoom
-pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<()> {
+pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<PathBuf> {
     let dest_path = path.parent().unwrap();
     let file: &Path = path.file_name().unwrap().as_ref();
 
@@ -117,15 +118,16 @@ pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(path.to_path_buf())
 }
 
 /// Parse an equation with the given zoom
 pub fn parse_equation(
-    path: &Path,
     content: &str,
     zoom: f32,
-) -> Result<()> {
+) -> Result<PathBuf> {
+    let path = Path::new(ART_PATH).join(hash(content)).with_extension("svg");
+
     // create a new tex file containing the equation
     if !path.with_extension("tex").exists() {
         let mut file = File::create(path.with_extension("tex")).map_err(|err| Error::Io(err))?;

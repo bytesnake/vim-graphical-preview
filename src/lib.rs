@@ -5,10 +5,15 @@ use std::sync::Once;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 
+use miniserde::{json, Serialize};
+
 mod error;
 mod utils;
 mod render;
+mod content;
 mod node_view;
+
+use error::{Error, Result};
 
 struct SingletonReader {
     inner: RefCell<render::Render>,
@@ -35,6 +40,15 @@ fn singleton() -> &'static SingletonReader {
     }
 }
 
+pub fn result_to_cstring<T: ToString>(res: Result<T>) -> CString {
+    let inner = match res {
+        Ok(inn) => format!("{{ \"ok\": {} }}", inn.to_string()),
+        Err(err) => format!("{{ \"err\": \"{}\" }}", err.to_string()),
+    };
+
+    CString::new(inner).unwrap()
+}
+
 macro_rules! export_fn {
     ($fn_name:ident,String)=> {
         #[no_mangle]
@@ -42,8 +56,8 @@ macro_rules! export_fn {
             let input = CStr::from_ptr(input);
             let in_str = input.to_str().unwrap();
         
-            let res_str = singleton().inner.borrow_mut().$fn_name(in_str).unwrap();
-            let res_str = CString::new(res_str).unwrap();
+            let res = singleton().inner.borrow_mut().$fn_name(in_str);
+            let res_str = result_to_cstring(res);
 
             res_str.into_raw()
         }
@@ -54,7 +68,7 @@ macro_rules! export_fn {
             let input = CStr::from_ptr(input);
             let in_str = input.to_str().unwrap();
         
-            singleton().inner.borrow_mut().$fn_name(in_str).unwrap()
+            match singleton().inner.borrow_mut().$fn_name(in_str)
         }
     };
     ($fn_name:ident,()) => {
@@ -71,5 +85,5 @@ macro_rules! export_fn {
 export_fn!(update_content, String);
 export_fn!(update_metadata, ());
 export_fn!(clear_all, ());
-export_fn!(draw, usize);
+export_fn!(draw, String);
 export_fn!(set_folds, ());

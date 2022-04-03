@@ -15,10 +15,17 @@ function! PrintError(msg) abort
 endfunction
 
 function! DrawInner()
-    let again = s:inst.call("draw", [""], "number")
+    let res = s:inst.call("draw", [""], "string")
+    let res = json_decode(res)
 
-    if again == 1
-        call Draw()
+    if has_key(res, 'err')
+	call PrintError(res['err'])
+    endif
+
+    if has_key(res, 'ok')
+        if res['ok'] == 1
+            call Draw()
+	endif
     endif
 endfunction
 
@@ -64,7 +71,7 @@ function! s:TextChanged()
     call s:UpdateMetadata()
     let current_buf = join(getline(1,'$'), "\n")
     let res = s:inst.call("update_content", [current_buf], "string")
-    let res = json_decode(res)
+    let res = json_decode(res)['ok']
     if has_key(res, 'update_folding')
         let s:folds = res['update_folding']
         call s:UpdateFolds()

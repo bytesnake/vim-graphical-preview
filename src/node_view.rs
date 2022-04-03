@@ -1,4 +1,5 @@
-use crate::render::{Metadata, Node};
+use crate::render::Metadata;
+use crate::content::Node;
 
 #[derive(PartialEq, Debug)]
 pub enum NodeView {
