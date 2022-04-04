@@ -19,6 +19,7 @@ function! DrawInner()
     let res = json_decode(res)
 
     if has_key(res, 'err')
+	let g:last_error = res['err']
 	call PrintError(res['err'])
     endif
 
@@ -35,6 +36,9 @@ function! Draw()
     endif
 
     let g:timer = timer_start(200, { tid -> execute('call DrawInner()')})
+    if exists("g:last_error")
+	    call PrintError("Error: " . g:last_error)
+    endif
 endfunction
 
 function! s:UpdateMetadata()
@@ -68,6 +72,10 @@ function! s:UpdateFolds()
 endfunction
 
 function! s:TextChanged()
+    if exists("g:last_error")
+	    unlet g:last_error 
+    endif
+
     call s:UpdateMetadata()
     let current_buf = join(getline(1,'$'), "\n")
     let res = s:inst.call("update_content", [current_buf], "string")

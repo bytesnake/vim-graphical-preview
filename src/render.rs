@@ -1,19 +1,16 @@
 use std::io::{Write, Stdout};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::thread;
+use std::path::Path;
 use std::fs::File;
 use std::os::unix::io::FromRawFd;
 use std::mem;
 
-use regex::Regex;
 use miniserde::{json, Serialize, Deserialize};
-use magick_rust::MagickWand;
 
 use crate::error::Result;
 use crate::utils;
 use crate::node_view::NodeView;
-use crate::content::{Content, Node, NodeFile};
+use crate::content::{Content, Node};
 
 pub const ART_PATH: &'static str = "/tmp/nvim_arts/";
 
@@ -187,6 +184,7 @@ impl Render {
         let new_view = NodeView::new(node,  &metadata, top_offset);
 
         // check if available and extract from shared mutex
+        let theight = node.range.1 - node.range.0;
         let img = match node.available() {
             Some(Ok(img)) => img,
             Some(Err(err)) => return Err(err),
@@ -194,11 +192,11 @@ impl Render {
                 return Ok(new_view.is_visible());
             }
         };
-        let theight = node.range.1 - node.range.0;
 
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
                 // clone and fit
+                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 Some((
                     img.write_image_blob("sixel").unwrap(),
@@ -207,6 +205,7 @@ impl Render {
             }, 
             (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
                 // clone and crop
+                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
@@ -216,6 +215,7 @@ impl Render {
             },
             (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
                 // clone and crop
+                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
@@ -225,6 +225,7 @@ impl Render {
             },
             (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
                 // clone and crop
+                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
@@ -234,6 +235,7 @@ impl Render {
             },
             (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
                 // clone and crop
+                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
@@ -244,10 +246,7 @@ impl Render {
             _ => None
         };
 
-        //if node.file.is_available() {
-            //*view = new_view;
-        //}
-
+        *view = new_view;
         if let Some((mut buf, pos)) = data {
             //dbg!(&metadata.viewport.0, &metadata.winpos.1);
             let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();

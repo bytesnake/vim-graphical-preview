@@ -93,11 +93,10 @@ impl Node {
         }
     }
 
-    pub fn available(&mut self) -> Option<Result<MagickWand>> {
+    pub fn available(&mut self) -> Option<Result<&MagickWand>> {
         let res = match &self.file {
             NodeFile::Running(inner) => {
                 let mut locked = inner.lock().unwrap();
-                use std::ops::Deref;
                 locked.take()
             },
             NodeFile::Done(_) => None
@@ -111,7 +110,7 @@ impl Node {
 
         match &self.file {
             NodeFile::Running(_) => None,
-            NodeFile::Done(wand) => Some(Ok(wand.clone())),
+            NodeFile::Done(wand) => Some(Ok(&wand)),
         }
     }
 }
@@ -165,14 +164,14 @@ impl Content {
                 let line = new_lines.get(&x.get(0).unwrap().start()).unwrap();
                 let id = utils::hash(&content);
 
-                (height, line, content, id, ContentType::Math)
+                (height, *line, content, id, ContentType::Math)
             });
 
         let picts = self.file_regex.captures_iter(content)
             .map(|x| {
                 let file_name = x.name("file_name").unwrap().as_str().to_string();
                 let height = x.name("new_lines").unwrap().as_str().len() - 1;
-                let line = new_lines.get(&x.get(0).unwrap().start()).unwrap();
+                let line = new_lines.get(&x.get(0).unwrap().start()).unwrap() + 1;
                 let id = utils::hash(&file_name);
 
                 (height, line, file_name, id, ContentType::File)
@@ -180,7 +179,7 @@ impl Content {
 
         let maths = maths.chain(picts)
             .map(|(height, line, content, id, kind)| {
-                let new_range = (*line, *line + height);
+                let new_range = (line, line + height);
 
                 // try to load from existing structures
                 if let Some(mut node) = old_nodes.remove(&id) {
@@ -196,7 +195,7 @@ impl Content {
                     nodes.insert(id.clone(), Node::new(id.clone(), new_range, &content, kind));
                 }
 
-                (*line, FoldInner::Node((id, NodeView::Hidden)))
+                (line, FoldInner::Node((id, NodeView::Hidden)))
             });
 
         let strcts = folds.iter()
