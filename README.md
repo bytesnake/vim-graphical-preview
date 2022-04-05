@@ -50,7 +50,7 @@ Before installing the vim plugin, make sure that toolchains for Rust and C are i
 Finally add the following section to your vim configuration
 ```
 Plug 'mattn/libcallex-vim', { 'do': 'make -C autoload' }
-Plug 'bytesnake/vim-inline-view', { 'do': 'cargo build --release' }
+Plug 'bytesnake/vim-graphical-preview', { 'do': 'cargo build --release' }
 ```
 
 and install with `source %|PlugInstall`.
@@ -64,3 +64,8 @@ vim: set filetype=markdown.graphical-preview :
 ## FAQ
 
  > TODO
+
+## Kudos to
+
+ - [heapslip](https://github.com/heapslip) for inspiring me with [vimimage](https://www.youtube.com/watch?v=cnt9mPOjrLg)
+ - the awesome people at alacritty, [Ayose Cazorla](https://github.com/alacritty/alacritty/pull/4763) and [microo8](https://github.com/microo8/alacritty-sixel)
