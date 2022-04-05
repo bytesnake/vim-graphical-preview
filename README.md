@@ -1,4 +1,4 @@
-# Preview pictures in terminals with SIXEL graphics
+# Display graphics in (N)ViM with SIXEL characters
 
 Adds the ability to display graphics to (N)ViM. This is developed for my digital notebook and is still in infancy. Expect weird behaviour and crashes.
 
