@@ -20,12 +20,8 @@ function! DrawInner(id)
 
     if has_key(res, 'err')
 	call PrintError("Error: " . res['err'])
-    endif
-
-    if has_key(res, 'ok')
-        if res['ok'] == 1
-            call Draw()
-	endif
+    elseif has_key(res, 'ok') && res['ok'] == 1
+	call Draw()
     endif
 endfunction
 
