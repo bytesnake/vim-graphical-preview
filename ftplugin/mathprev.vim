@@ -14,13 +14,12 @@ function! PrintError(msg) abort
     echohl None
 endfunction
 
-function! DrawInner()
+function! DrawInner(id)
     let res = s:inst.call("draw", [""], "string")
     let res = json_decode(res)
 
     if has_key(res, 'err')
-	let g:last_error = res['err']
-	call PrintError(res['err'])
+	call PrintError("Error: " . res['err'])
     endif
 
     if has_key(res, 'ok')
@@ -35,10 +34,7 @@ function! Draw()
         call timer_stop(g:timer)
     endif
 
-    let g:timer = timer_start(200, { tid -> execute('call DrawInner()')})
-    if exists("g:last_error")
-	    call PrintError("Error: " . g:last_error)
-    endif
+    let g:timer = timer_start(200, "DrawInner")
 endfunction
 
 function! s:UpdateMetadata()
@@ -72,10 +68,6 @@ function! s:UpdateFolds()
 endfunction
 
 function! s:TextChanged()
-    if exists("g:last_error")
-	    unlet g:last_error 
-    endif
-
     call s:UpdateMetadata()
     let current_buf = join(getline(1,'$'), "\n")
     let res = s:inst.call("update_content", [current_buf], "string")
