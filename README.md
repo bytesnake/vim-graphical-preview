@@ -1,6 +1,6 @@
-# Display graphics in (N)ViM with SIXEL characters
+# Display graphics in (N)Vim with SIXEL characters
 
-Adds the ability to display graphics to (N)ViM. This is developed for my digital notebook and is still in infancy. Expect weird behaviour and crashes.
+Adds the ability to display graphics to (N)Vim. This is developed for my digital notebook and is still in infancy. Expect weird behaviour and crashes.
 
 The picture's content is streamed via the SIXEL character set (see [1](https://saitoha.github.io/libsixel/), [2](https://en.wikipedia.org/wiki/Sixel), [3](https://www.vt100.net/docs/vt3xx-gp/chapter14.html) for more information) 
 
@@ -62,6 +62,10 @@ vim: set filetype=markdown.graphical-preview :
 ```
 
 ## FAQ
+
+ > The graphic is overlapping with the command and status line
+
+This is a limitation of SIXEL as it always scrolls after a line and would do that as well for the last one. Otherwise we could overlap and delete with a raster sequence. There is special mode, disabling this behaviour, but then your image is fixed at the upper, left corner (see [here](https://gitlab.com/AutumnMeowMeow/jexer/-/issues/61)).
 
  > TODO
 
