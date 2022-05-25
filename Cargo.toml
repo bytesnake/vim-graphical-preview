@@ -11,7 +11,7 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 
 [dependencies]
 miniserde = "0.1"
-magick_rust = "0.15"
+magick_rust = {version="0.15", features=["disable-hdri"]}
 regex = "1.5.4"
 sha2 = "0.10"
 which = "4"
