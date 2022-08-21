@@ -5,15 +5,13 @@ use std::sync::Once;
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 
-use miniserde::{json, Serialize};
-
 mod error;
 mod utils;
 mod render;
 mod content;
 mod node_view;
 
-use error::{Error, Result};
+use error::Result;
 
 struct SingletonReader {
     inner: RefCell<render::Render>,

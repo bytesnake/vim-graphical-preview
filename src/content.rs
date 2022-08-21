@@ -1,9 +1,9 @@
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::BTreeMap;
 use std::thread;
 use std::sync::{Mutex, Arc};
-use magick_rust::{MagickWand, bindings::{ColorspaceType_GRAYColorspace, DitherMethod_NoDitherMethod}};
+use magick_rust::MagickWand;
 
 use crate::error::{Error, Result};
 use crate::render::{FoldState, Fold, FoldInner, ART_PATH, CodeId};
@@ -16,10 +16,18 @@ pub enum ContentType {
     Gnuplot,
     Tex,
     File,
-    Header,
 }
 
 impl ContentType {
+    pub fn from_fence(kind: &str) -> Result<Self> {
+        match kind {
+            "math" => Ok(Self::Math),
+            "gnuplot" => Ok(Self::Gnuplot),
+            "tex" => Ok(Self::Tex),
+            _ => Err(Error::UnknownFence(kind.to_string())),
+        }
+    }
+
     pub fn generate(&self, content: String) -> Result<MagickWand> {
         let path = self.path(&content);
         let missing = !path.exists();
@@ -36,9 +44,6 @@ impl ContentType {
             }
         }
 
-        use std::time::Instant;
-        let now = Instant::now();
-
         let wand = MagickWand::new();
         wand.set_resolution(600.0, 600.0).unwrap();
 
@@ -46,9 +51,6 @@ impl ContentType {
         //wand.set_compression_quality(5).unwrap();
         //wand.transform_image_colorspace(ColorspaceType_GRAYColorspace).unwrap();
         //wand.quantize_image(8, ColorspaceType_GRAYColorspace, 0, DitherMethod_NoDitherMethod, 0).unwrap();
-
-        let dur = now.elapsed();
-        //println!("{:?}", dur);
 
         Ok(wand)
     }
@@ -117,9 +119,7 @@ impl Node {
 }
 
 pub struct Content {
-    math_regex: Regex,
-    gnuplot_regex: Regex,
-    tex_regex: Regex,
+    fences_regex: Regex,
     file_regex: Regex,
     header_regex: Regex,
     newlines: Regex,
@@ -128,16 +128,14 @@ pub struct Content {
 impl Content {
     pub fn new() -> Content {
         Content {
-            math_regex: Regex::new(r"\n```math(,height=(?P<height>([\d]+)?))?[\w]*\n(?P<inner>[\s\S]+?)?```").unwrap(),
-            gnuplot_regex: Regex::new(r"```gnuplot(,height=(?P<height>[\d]+?))?[\w]*\n(?P<inner>[\s\S]+?)?```").unwrap(),
-            tex_regex: Regex::new(r"```tex(,height=(?P<height>[\d]+?))?[\w]*\n(?P<inner>[\s\S]+?)?```").unwrap(),
+            fences_regex: Regex::new(r"```(?P<name>([a-z]{3,}))(,height=(?P<height>([\d]+)))?[\w]*\n(?P<inner>[\s\S]+?)?```").unwrap(),
             file_regex: Regex::new(r#"\n(?P<alt>!\[[^\]]*\])\((?P<file_name>.*?)\)(?P<new_lines>\n*)"#).unwrap(),
             header_regex: Regex::new(r"\n(#{1,6}.*)").unwrap(),
             newlines: Regex::new(r"\n").unwrap(),
         }
     }
 
-    pub fn process(&self, content: &str, mut old_nodes: BTreeMap<String, Node>) -> (BTreeMap<String, Node>, BTreeMap<usize, FoldInner>, Vec<usize>, bool) {
+    pub fn process(&self, content: &str, mut old_nodes: BTreeMap<String, Node>) -> Result<(BTreeMap<String, Node>, BTreeMap<usize, FoldInner>, Vec<usize>, bool)> {
         // put new lines into a btree map for later
         let (_, mut new_lines) = self.newlines.find_iter(content)
             .map(|x| x.start())
@@ -156,30 +154,34 @@ impl Content {
 
         let mut nodes = BTreeMap::new();
         let mut any_changed = false;
-        let maths = self.math_regex.captures_iter(content)
+
+        let maths = self.fences_regex.captures_iter(content)
             .map(|x| {
+                let kind = x.name("name").unwrap().as_str();
                 let content = x.name("inner").map_or("", |x| x.as_str()).to_string();
                 let height = x.name("height")
                     .and_then(|x| x.as_str().parse::<usize>().ok())
                     .unwrap_or_else(|| content.matches('\n').count() + 1);
-                let line = new_lines.get(&x.get(0).unwrap().start()).unwrap();
+                let line = new_lines.get(&(x.get(0).unwrap().start() - 1)).unwrap();
                 let id = utils::hash(&content);
 
-                (height, *line, content, id, ContentType::Math)
+                ContentType::from_fence(kind).map(|c|
+                    (height, *line, content, id, c)
+                )
             });
 
-        let picts = self.file_regex.captures_iter(content)
+        let files = self.file_regex.captures_iter(content)
             .map(|x| {
                 let file_name = x.name("file_name").unwrap().as_str().to_string();
                 let height = x.name("new_lines").unwrap().as_str().len() - 1;
                 let line = new_lines.get(&x.get(0).unwrap().start()).unwrap() + 1;
                 let id = utils::hash(&file_name);
 
-                (height, line, file_name, id, ContentType::File)
+                Ok((height, line, file_name, id, ContentType::File))
             });
 
-        let maths = maths.chain(picts)
-            .map(|(height, line, content, id, kind)| {
+        let strcts_gen = maths.chain(files)
+            .map(|x| x.map(|(height, line, content, id, kind)| {
                 let new_range = (line, line + height);
 
                 // try to load from existing structures
@@ -197,7 +199,7 @@ impl Content {
                 }
 
                 (line, FoldInner::Node((id, NodeView::Hidden)))
-            });
+            }));
 
         let strcts = folds.iter()
             .map(|line| {
@@ -205,14 +207,14 @@ impl Content {
                     state: FoldState::Open,
                     line: *line,
                 };
-                (*line, FoldInner::Fold(new_fold))
+                Ok((*line, FoldInner::Fold(new_fold)))
             })
-            .chain(maths)
-            .collect::<BTreeMap<_, _>>();
+            .chain(strcts_gen)
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         //dbg!(&strcts);
 
-        (nodes, strcts, folds, any_changed)
+        Ok((nodes, strcts, folds, any_changed))
     }
 
 }

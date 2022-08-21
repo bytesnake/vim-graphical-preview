@@ -244,7 +244,6 @@ impl Render {
 
         *view = new_view;
 
-         use std::time::Instant;
 
         if let Some((mut buf, pos)) = data {
             //dbg!(&metadata.viewport.0, &metadata.winpos.1);
@@ -305,8 +304,8 @@ impl Render {
     }
 
     pub fn update_content(&mut self, content: &str) -> Result<String> {
-        let old_blocks = mem::replace(&mut self.blocks, BTreeMap::new());
-        let (nodes, strcts, folds, any_changed) = self.content.process(content, old_blocks);
+        let old_blocks = mem::take(&mut self.blocks);
+        let (nodes, strcts, folds, any_changed) = self.content.process(content, old_blocks)?;
 
         self.strcts = strcts;
         self.blocks = nodes;
