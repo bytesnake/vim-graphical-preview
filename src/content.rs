@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use std::thread;
 use std::sync::{Mutex, Arc};
-use magick_rust::MagickWand;
+use magick_rust::{MagickWand, bindings::{ColorspaceType_GRAYColorspace, DitherMethod_NoDitherMethod}};
 
 use crate::error::{Error, Result};
 use crate::render::{FoldState, Fold, FoldInner, ART_PATH, CodeId};
 use crate::node_view::NodeView;
 use crate::utils;
 
+#[derive(Debug)]
 pub enum ContentType {
     Math,
     Gnuplot,
@@ -19,19 +20,37 @@ pub enum ContentType {
 }
 
 impl ContentType {
-    pub fn generate(&self, content: String) -> Result<PathBuf> {
-        match self {
-            ContentType::Math => utils::parse_equation(&content, 1.0),
-            ContentType::File => {
-                let path = PathBuf::from(content);
-                if path.exists() {
-                    Ok(path)
-                } else {
-                    Err(Error::FileNotFound(path))
-                }
-            },
-            _ => Ok(PathBuf::new())
+    pub fn generate(&self, content: String) -> Result<MagickWand> {
+        let path = self.path(&content);
+        let missing = !path.exists();
+
+        if missing {
+            match self {
+                ContentType::Math => {
+                    utils::parse_equation(&content, 1.0)?;
+                },
+                ContentType::File => {
+                    return Err(Error::FileNotFound(path))
+                },
+                _  => panic!("Not supported {:?}", self),
+            }
         }
+
+        use std::time::Instant;
+        let now = Instant::now();
+
+        let wand = MagickWand::new();
+        wand.set_resolution(600.0, 600.0).unwrap();
+
+        wand.read_image(path.to_str().unwrap()).unwrap();
+        //wand.set_compression_quality(5).unwrap();
+        //wand.transform_image_colorspace(ColorspaceType_GRAYColorspace).unwrap();
+        //wand.quantize_image(8, ColorspaceType_GRAYColorspace, 0, DitherMethod_NoDitherMethod, 0).unwrap();
+
+        let dur = now.elapsed();
+        //println!("{:?}", dur);
+
+        Ok(wand)
     }
 
     pub fn path(&self, content: &str) -> PathBuf {
@@ -39,48 +58,36 @@ impl ContentType {
         match self {
             ContentType::Math => PathBuf::from(ART_PATH).join(id).with_extension("svg"),
             ContentType::File => PathBuf::from(content),
-            _ => panic!("Not supported")
+            _ => panic!("Not supported {:?}", self),
         }
     }
 }
 
 pub enum NodeFile {
-    Running(Arc<Mutex<Option<Result<PathBuf>>>>),
-    Done(MagickWand),
+    Running,
+    Done(Result<MagickWand>),
 }
 
 impl NodeFile {
-    pub fn new(content: &str, kind: ContentType) -> NodeFile {
-        let path = kind.path(content);
+    pub fn new(content: &str, kind: ContentType) -> Arc<Mutex<NodeFile>> {
+        let state = Arc::new(Mutex::new(NodeFile::Running));
+        let state_clone = state.clone();
+        let content = content.to_string();
 
-        // check if file already exists, otherwise initiate creation
-        if !path.exists() {
-            let state = Arc::new(Mutex::new(None));
-            let state_clone = state.clone();
-            let content = content.to_string();
-            thread::spawn(move || {
-                let res = Some(kind.generate(content));
-                *state_clone.lock().unwrap() = res;
-            });
+        thread::spawn(move || {
+            let res = kind.generate(content);
+            *state_clone.lock().unwrap() = Self::Done(res);
+        });
 
-            NodeFile::Running(state)
-        } else {
-            Self::from_path(&path)
-        }
-    }
-
-    pub fn from_path(path: &Path) -> NodeFile {
-        let wand = MagickWand::new();
-        wand.set_resolution(500.0, 500.0).unwrap();
-
-        wand.read_image(path.to_str().unwrap()).unwrap();
-        NodeFile::Done(wand)
+        state
     }
 }
 
+unsafe impl Send for NodeFile {}
+
 pub struct Node {
     pub id: CodeId,
-    file: NodeFile,
+    file: Arc<Mutex<NodeFile>>,
     pub range: (usize, usize),
 }
 
@@ -93,24 +100,18 @@ impl Node {
         }
     }
 
-    pub fn available(&mut self) -> Option<Result<&MagickWand>> {
-        let res = match &self.file {
-            NodeFile::Running(inner) => {
-                let mut locked = inner.lock().unwrap();
-                locked.take()
-            },
-            NodeFile::Done(_) => None
-        };
+    pub fn available(&mut self) -> Option<Result<MagickWand>> {
+        let content = std::mem::replace(&mut *self.file.lock().unwrap(), NodeFile::Running);
 
-        match res {
-            Some(Ok(file)) => self.file = NodeFile::from_path(&file),
-            Some(Err(err)) => return Some(Err(err)),
-            _ => {}
-        }
+        match content {
+            NodeFile::Running => None,
+            NodeFile::Done(file) => {
+                if let Ok(file) = &file {
+                    *self.file.lock().unwrap() = NodeFile::Done(Ok(file.clone()));
+                }
 
-        match &self.file {
-            NodeFile::Running(_) => None,
-            NodeFile::Done(wand) => Some(Ok(&wand)),
+                Some(file)
+            }
         }
     }
 }
@@ -150,7 +151,7 @@ impl Content {
 
         let folds = self.header_regex.find_iter(content)
             .filter_map(|x| new_lines.get(&x.start()))
-            .map(|x| *x)
+            .copied()
             .collect::<Vec<_>>();
 
         let mut nodes = BTreeMap::new();
@@ -160,7 +161,7 @@ impl Content {
                 let content = x.name("inner").map_or("", |x| x.as_str()).to_string();
                 let height = x.name("height")
                     .and_then(|x| x.as_str().parse::<usize>().ok())
-                    .unwrap_or_else(|| content.matches("\n").count() + 1);
+                    .unwrap_or_else(|| content.matches('\n').count() + 1);
                 let line = new_lines.get(&x.get(0).unwrap().start()).unwrap();
                 let id = utils::hash(&content);
 

@@ -16,3 +16,8 @@ regex = "1.5.4"
 sha2 = "0.10"
 which = "4"
 nix = "0.23"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

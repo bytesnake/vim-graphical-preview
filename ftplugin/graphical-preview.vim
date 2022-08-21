@@ -30,7 +30,7 @@ function! Draw()
         call timer_stop(g:timer)
     endif
 
-    let g:timer = timer_start(200, "DrawInner")
+    let g:timer = timer_start(50, "DrawInner")
 endfunction
 
 function! s:UpdateMetadata()

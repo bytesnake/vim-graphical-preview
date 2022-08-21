@@ -12,7 +12,7 @@ use crate::utils;
 use crate::node_view::NodeView;
 use crate::content::{Content, Node};
 
-pub const ART_PATH: &'static str = "/tmp/nvim_arts/";
+pub const ART_PATH: &str = "/tmp/nvim_arts/";
 
 pub type CodeId = String;
 pub type Folds = Vec<(usize, isize)>;
@@ -38,7 +38,7 @@ impl Metadata {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub enum FoldState {
     Folded(usize),
     Open,
@@ -181,10 +181,11 @@ impl Render {
         Ok(if pending { 1 } else { 0 })
     }
     pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize, char_height: usize) -> Result<bool> {
-        let new_view = NodeView::new(node,  &metadata, top_offset);
+        let new_view = NodeView::new(node,  metadata, top_offset);
 
         // check if available and extract from shared mutex
         let theight = node.range.1 - node.range.0;
+        //dbg!(&node.available().is_some());
         let img = match node.available() {
             Some(Ok(img)) => img,
             Some(Err(err)) => return Err(err),
@@ -196,7 +197,6 @@ impl Render {
         let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
             (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
                 // clone and fit
-                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 Some((
                     img.write_image_blob("sixel").unwrap(),
@@ -205,7 +205,6 @@ impl Render {
             }, 
             (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
                 // clone and crop
-                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
@@ -215,7 +214,6 @@ impl Render {
             },
             (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
                 // clone and crop
-                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
                 Some((
@@ -225,7 +223,6 @@ impl Render {
             },
             (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
                 // clone and crop
-                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
@@ -235,7 +232,6 @@ impl Render {
             },
             (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
                 // clone and crop
-                let img = img.clone();
                 img.fit(100000, theight * char_height);
                 img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
                 Some((
@@ -247,6 +243,9 @@ impl Render {
         };
 
         *view = new_view;
+
+         use std::time::Instant;
+
         if let Some((mut buf, pos)) = data {
             //dbg!(&metadata.viewport.0, &metadata.winpos.1);
             let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();
@@ -255,6 +254,7 @@ impl Render {
             //}
 
             //wbuf.append(&mut format!("\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes());
+            //dbg!(&buf.len());
             wbuf.append(&mut buf);
             //wbuf.append(&mut format!("\x1b[{};{}H", metadata.viewport.0, metadata.winpos.1).into_bytes());
             //wbuf.append(&mut format!("\x1b[?80h\x1bP100;1q\"1;1;2000;50\"1;1;2000;50\x1b[u\x1b\\").into_bytes());
@@ -275,6 +275,7 @@ impl Render {
                 drop(outer_lock);
             }
         }
+
 
         Ok(false)
     }
