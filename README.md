@@ -8,7 +8,7 @@ The picture's content is streamed via the SIXEL character set (see [1](https://s
 
  - [x] Render LaTex equations within math fences
  - [x] Display pictures in standalone image links
- - [ ] Support GnuPlot, arbitrary LaTex, fetch source from other files
+ - [x] Support GnuPlot, arbitrary LaTex, fetch source from other files
  - [ ] Fix many weird artifacts of SIXEL
 
 ## Examples
