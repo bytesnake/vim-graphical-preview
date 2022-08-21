@@ -11,6 +11,7 @@ pub enum Error {
     FileNotFound(PathBuf),
     BinaryNotFound(which::Error),
     UnknownFence(String),
+    InvalidImage(String),
     Io(io::Error),
 }
  
@@ -27,6 +28,8 @@ impl fmt::Display for Error {
                 format!("binary not found: {}", binary),
             Error::UnknownFence(kind) =>
                 format!("unknown fence with name {}", kind),
+            Error::InvalidImage(path) =>
+                format!("could not read in {} as image", path),
             Error::Io(io_err) => format!("IO error: {}", io_err)
         };
 

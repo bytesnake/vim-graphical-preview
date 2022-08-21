@@ -10,7 +10,7 @@ use crate::render::{FoldState, Fold, FoldInner, ART_PATH, CodeId};
 use crate::node_view::NodeView;
 use crate::utils;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ContentType {
     Math,
     Gnuplot,
@@ -23,13 +23,13 @@ impl ContentType {
         match kind {
             "math" => Ok(Self::Math),
             "gnuplot" => Ok(Self::Gnuplot),
-            "tex" => Ok(Self::Tex),
+            "latex" | "tex" => Ok(Self::Tex),
             _ => Err(Error::UnknownFence(kind.to_string())),
         }
     }
 
     pub fn generate(&self, content: String) -> Result<MagickWand> {
-        let path = self.path(&content);
+        let mut path = self.path(&content);
         let missing = !path.exists();
 
         if missing {
@@ -40,14 +40,35 @@ impl ContentType {
                 ContentType::File => {
                     return Err(Error::FileNotFound(path))
                 },
-                _  => panic!("Not supported {:?}", self),
+                ContentType::Tex => {
+                    utils::parse_latex(&content)?;
+                },
+                ContentType::Gnuplot => {
+                    let path = utils::generate_latex_from_gnuplot(&content)?;
+                    utils::generate_svg_from_latex(&path, 1.0)?;
+                },
+            }
+        }
+
+        // rewrite path if ending as tex or gnuplot file
+        if *self == ContentType::File {
+            if path.extension().unwrap() == "tex" {
+                let new_path = utils::parse_latex_from_file(&path)?;
+                path = new_path.with_extension("svg");
+            }
+
+            if path.extension().unwrap() == "plt" {
+                let new_path = utils::generate_latex_from_gnuplot_file(&path)?;
+                path = new_path.with_extension("svg");
             }
         }
 
         let wand = MagickWand::new();
         wand.set_resolution(600.0, 600.0).unwrap();
 
-        wand.read_image(path.to_str().unwrap()).unwrap();
+        wand.read_image(path.to_str().unwrap())
+            .map_err(|_| Error::InvalidImage(path.to_str().unwrap().to_string()))?;
+
         //wand.set_compression_quality(5).unwrap();
         //wand.transform_image_colorspace(ColorspaceType_GRAYColorspace).unwrap();
         //wand.quantize_image(8, ColorspaceType_GRAYColorspace, 0, DitherMethod_NoDitherMethod, 0).unwrap();
@@ -58,9 +79,8 @@ impl ContentType {
     pub fn path(&self, content: &str) -> PathBuf {
         let id = utils::hash(content);
         match self {
-            ContentType::Math => PathBuf::from(ART_PATH).join(id).with_extension("svg"),
             ContentType::File => PathBuf::from(content),
-            _ => panic!("Not supported {:?}", self),
+            _ => PathBuf::from(ART_PATH).join(id).with_extension("svg"),
         }
     }
 }

@@ -1,7 +1,8 @@
+use std::io::Read;
 use std::{str, usize, io::Write};
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 use nix::{ioctl_read_bad, pty::Winsize};
 
@@ -46,7 +47,7 @@ pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<PathBuf> {
     let dvi_path = path.with_extension("dvi");
     if !dvi_path.exists() {
         let latex_path = which::which("latex")
-            .map_err(|err| Error::BinaryNotFound(err))?;
+            .map_err(Error::BinaryNotFound)?;
 
         let cmd = Command::new(latex_path)
             .current_dir(&dest_path)
@@ -67,15 +68,15 @@ pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<PathBuf> {
             }
 
             let err = buf
-                .split("\n")
+                .split('\n')
                 .filter(|x| {
                     (x.starts_with("! ") || x.starts_with("l.")) && !x.contains("Emergency stop")
                 })
                 .fold(("", "", usize::MAX), |mut err, elm| {
                     if elm.starts_with("! ") {
                         err.0 = elm;
-                    } else if elm.starts_with("l.") {
-                        let mut elms = elm[2..].splitn(2, " ").map(|x| x.trim());
+                    } else if let Some(elms) = elm.strip_prefix("1.") {
+                        let mut elms = elms.splitn(2, ' ').map(|x| x.trim());
                         if let Some(Ok(val)) = elms.next().map(|x| x.parse::<usize>()) {
                             err.2 = val;
                         }
@@ -99,7 +100,7 @@ pub fn generate_svg_from_latex(path: &Path, zoom: f32) -> Result<PathBuf> {
     let svg_path = path.with_extension("svg");
     if !svg_path.exists() && dvi_path.exists() {
         let dvisvgm_path = which::which("dvisvgm")
-            .map_err(|err| Error::BinaryNotFound(err))?;
+            .map_err(Error::BinaryNotFound)?;
 
         let cmd = Command::new(dvisvgm_path)
             .current_dir(&dest_path)
@@ -130,17 +131,90 @@ pub fn parse_equation(
 
     // create a new tex file containing the equation
     if !path.with_extension("tex").exists() {
-        let mut file = File::create(path.with_extension("tex")).map_err(|err| Error::Io(err))?;
+        let mut file = File::create(path.with_extension("tex")).map_err(Error::Io)?;
 
         file.write_all("\\documentclass[20pt, preview]{standalone}\n\\usepackage{amsmath}\\usepackage{amsfonts}\n\\begin{document}\n$$\n".as_bytes())
-            .map_err(|err| Error::Io(err))?;
+            .map_err(Error::Io)?;
 
         file.write_all(content.as_bytes())
-            .map_err(|err| Error::Io(err))?;
+            .map_err(Error::Io)?;
 
         file.write_all("$$\n\\end{document}".as_bytes())
-            .map_err(|err| Error::Io(err))?;
+            .map_err(Error::Io)?;
     }
 
     generate_svg_from_latex(&path, zoom)
+}
+
+/// Generate latex file from gnuplot
+///
+/// This function generates a latex file with gnuplot `epslatex` backend and then source it into
+/// the generate latex function
+pub fn generate_latex_from_gnuplot(content: &str) -> Result<PathBuf> {
+    let path = Path::new(ART_PATH).join(hash(content)).with_extension("tex");
+
+    let gnuplot_path = which::which("gnuplot")
+        .map_err(Error::BinaryNotFound)?;
+
+    let cmd = Command::new(gnuplot_path)
+        .stdin(Stdio::piped())
+        .current_dir(ART_PATH)
+        .arg("-p")
+        .spawn()
+        .unwrap();
+    //.expect("Could not spawn gnuplot");
+
+    let mut stdin = cmd.stdin.unwrap();
+
+    stdin
+        .write_all(format!("set output '{}'\n", path.file_name().unwrap().to_str().unwrap()).as_bytes())
+        .map_err(Error::Io)?;
+    stdin
+        .write_all("set terminal epslatex color standalone\n".as_bytes())
+        .map_err(Error::Io)?;
+    stdin
+        .write_all(content.as_bytes())
+        .map_err(Error::Io)?;
+
+    Ok(path)
+}
+
+pub fn generate_latex_from_gnuplot_file(path: &Path) -> Result<PathBuf> {
+    let mut content = String::new();
+    let mut f = File::open(path)
+        .map_err(Error::Io)?;
+    f.read_to_string(&mut content).unwrap();
+
+    let path = generate_latex_from_gnuplot(&content)?;
+    generate_svg_from_latex(&path, 1.0)
+}
+
+/// Parse a latex content and convert it to a SVG file
+pub fn parse_latex(
+    content: &str,
+) -> Result<PathBuf> {
+    let path = Path::new(ART_PATH).join(hash(content)).with_extension("tex");
+
+    // create a new tex file containing the equation
+    if !path.exists() {
+        let mut file = File::create(&path).map_err(Error::Io)?;
+
+        file.write_all(content.as_bytes())
+            .map_err(Error::Io)?;
+    }
+
+    generate_svg_from_latex(&path, 1.0)?;
+
+    Ok(path)
+}
+
+pub fn parse_latex_from_file(
+    path: &Path,
+) -> Result<PathBuf> {
+    let mut content = String::new();
+    let mut f = File::open(path)
+        .map_err(Error::Io)?;
+    f.read_to_string(&mut content).unwrap();
+
+    parse_latex(&content)
 }
