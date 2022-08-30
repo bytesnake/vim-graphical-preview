@@ -9,23 +9,21 @@ The picture's content is streamed via the SIXEL character set (see [1](https://s
  - [x] Render LaTex equations within math fences
  - [x] Display pictures in standalone image links
  - [x] Support GnuPlot, arbitrary LaTex, fetch source from other files
- - [ ] Fix many weird artifacts of SIXEL
+ - [ ] Fix weird artifacts of SIXEL
 
 ## Examples
 
 ### Graphic and LaTex math support
 
-![Sample of pictures and equations](artifacts.gif)
+https://user-images.githubusercontent.com/989353/187507544-9cbebd36-5a53-43eb-898a-5f64200d8b68.mp4
 
 ### Support folding
 
-![Support for folding](folding.gif)
+https://user-images.githubusercontent.com/989353/187507582-f4daee70-ead3-4aba-a256-4d4c72223bbd.mp4
 
 ### Stream SIXEL characters via any text medium
 
-![Access through SSH](remote-display.gif)
-
-
+https://user-images.githubusercontent.com/989353/187510494-0416f52a-6b69-4e36-a901-d58aa0747d63.mp4
 
 ## Installation
 
