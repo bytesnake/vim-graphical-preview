@@ -193,17 +193,19 @@ pub fn generate_latex_from_gnuplot_file(path: &Path) -> Result<PathBuf> {
 pub fn parse_latex(
     content: &str,
 ) -> Result<PathBuf> {
-    let path = Path::new(ART_PATH).join(hash(content)).with_extension("tex");
+    let path = Path::new(ART_PATH).join(hash(content)).with_extension("svg");
 
     // create a new tex file containing the equation
-    if !path.exists() {
-        let mut file = File::create(&path).map_err(Error::Io)?;
+    if !path.with_extension("tex").exists() {
+         let mut file = File::create(&path.with_extension("tex")).map_err(Error::Io)?;
 
-        file.write_all(content.as_bytes())
+         file.write_all(content.as_bytes())
             .map_err(Error::Io)?;
     }
 
-    generate_svg_from_latex(&path, 1.0)?;
+    if !path.exists() {
+        generate_svg_from_latex(&path, 1.0)?;
+    }
 
     Ok(path)
 }

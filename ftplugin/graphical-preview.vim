@@ -4,7 +4,7 @@ endif
 let g:loaded_math_preview = 1
 
 let s:path = resolve(expand('<sfile>:p:h') . "/../")
-let s:inst = libcallex#load(s:path . "/target/release/libvim_math.so")
+let s:inst = libcallex#load(s:path . "/target/release/libvim_graphical_preview.so")
 let s:folds = []
 
 function! PrintError(msg) abort
@@ -57,6 +57,7 @@ function! s:UpdateFolds()
     for lnum in s:folds
         call add(l:folding_state, [lnum, foldclosedend(lnum)])
     endfor
+    mode
     let any_changed =  s:inst.call("set_folds", [json_encode(folding_state)], "")
     if any_changed
         call Draw()

@@ -1,12 +1,12 @@
 [package]
-name = "vim-math"
+name = "vim-graphical-preview"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "vim_math"
+name = "vim_graphical_preview"
 crate-type = ["cdylib"]      # Creates dynamic lib
 
 [dependencies]
@@ -16,6 +16,7 @@ regex = "1.5.4"
 sha2 = "0.10"
 which = "4"
 nix = "0.23"
+flame = "0.2"
 
 [profile.release]
 lto = true

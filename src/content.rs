@@ -1,8 +1,8 @@
 use regex::Regex;
 use std::path::PathBuf;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::thread;
-use std::sync::{Mutex, Arc};
+use std::sync::{RwLock, Arc};
 use magick_rust::MagickWand;
 
 use crate::error::{Error, Result};
@@ -10,7 +10,15 @@ use crate::render::{FoldState, Fold, FoldInner, ART_PATH, CodeId};
 use crate::node_view::NodeView;
 use crate::utils;
 
-#[derive(Debug, Eq, PartialEq)]
+pub type Sixel = Vec<u8>;
+
+#[derive(PartialEq, Eq, Hash, Debug, Clone)]
+pub struct NodeDim {
+    pub(crate) height: usize,
+    pub(crate) crop: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum ContentType {
     Math,
     Gnuplot,
@@ -28,7 +36,7 @@ impl ContentType {
         }
     }
 
-    pub fn generate(&self, content: String) -> Result<MagickWand> {
+    pub fn generate(&self, content: String) -> Result<WrappedWand> {
         let mut path = self.path(&content);
         let missing = !path.exists();
 
@@ -53,8 +61,7 @@ impl ContentType {
         // rewrite path if ending as tex or gnuplot file
         if *self == ContentType::File {
             if path.extension().unwrap() == "tex" {
-                let new_path = utils::parse_latex_from_file(&path)?;
-                path = new_path.with_extension("svg");
+                path = utils::parse_latex_from_file(&path)?;
             }
 
             if path.extension().unwrap() == "plt" {
@@ -73,9 +80,9 @@ impl ContentType {
         //wand.transform_image_colorspace(ColorspaceType_GRAYColorspace).unwrap();
         //wand.quantize_image(8, ColorspaceType_GRAYColorspace, 0, DitherMethod_NoDitherMethod, 0).unwrap();
 
-        Ok(wand)
+        Ok(WrappedWand(wand))
     }
-
+    
     pub fn path(&self, content: &str) -> PathBuf {
         let id = utils::hash(content);
         match self {
@@ -85,56 +92,105 @@ impl ContentType {
     }
 }
 
-pub enum NodeFile {
-    Running,
-    Done(Result<MagickWand>),
-}
+#[derive(Clone)]
+pub struct WrappedWand(MagickWand);
 
-impl NodeFile {
-    pub fn new(content: &str, kind: ContentType) -> Arc<Mutex<NodeFile>> {
-        let state = Arc::new(Mutex::new(NodeFile::Running));
-        let state_clone = state.clone();
-        let content = content.to_string();
+impl WrappedWand {
+    pub fn wand_to_sixel(self, dim: NodeDim) -> Vec<u8> {
+        self.0.fit(100000, dim.height);
 
-        thread::spawn(move || {
-            let res = kind.generate(content);
-            *state_clone.lock().unwrap() = Self::Done(res);
-        });
+        if let Some(crop) = dim.crop {
+            self.0.crop_image(self.0.get_image_width(), crop.0, 0, crop.1 as isize).unwrap();
+        }
 
-        state
+        self.0.write_image_blob("sixel").unwrap()
     }
 }
 
-unsafe impl Send for NodeFile {}
+unsafe impl Send for WrappedWand {}
+unsafe impl Sync for WrappedWand {}
+
+pub enum ContentState {
+    Empty,
+    Running,
+    Ok(WrappedWand),
+    Err(Error),
+}
+
+impl ContentState {
+    pub fn new() -> Shared<ContentState> {
+        Arc::new(RwLock::new(ContentState::Empty))
+    }
+}
+
+
+type Shared<T> = Arc<RwLock<T>>;
 
 pub struct Node {
     pub id: CodeId,
-    file: Arc<Mutex<NodeFile>>,
     pub range: (usize, usize),
+    content: (String, ContentType),
+    state: Shared<ContentState>,
+    sixel_cache: Shared<HashMap<NodeDim, Sixel>>,
 }
 
 impl Node {
     pub fn new(id: CodeId, range: (usize, usize), content: &str, kind: ContentType) -> Node {
-        let file = NodeFile::new(content, kind);
+        let state = ContentState::new();
+        let sixel_cache = Arc::new(RwLock::new(HashMap::new()));
+        let content = (content.to_string(), kind);
 
         Node {
-            id, file, range
+            id, range, state, sixel_cache, content
         }
     }
 
-    pub fn available(&mut self) -> Option<Result<MagickWand>> {
-        let content = std::mem::replace(&mut *self.file.lock().unwrap(), NodeFile::Running);
+    pub fn get_sixel(&mut self, dim: NodeDim) -> Option<Result<Sixel>> {
+        let Node { sixel_cache, state, content, .. } = self;
 
-        match content {
-            NodeFile::Running => None,
-            NodeFile::Done(file) => {
-                if let Ok(file) = &file {
-                    *self.file.lock().unwrap() = NodeFile::Done(Ok(file.clone()));
-                }
-
-                Some(file)
-            }
+        // first check the SIXEL blob cache
+        if let Some(data) = (*sixel_cache.read().unwrap()).get(&dim) {
+            return Some(Ok(data.clone()));
         }
+
+        let state_cont = std::mem::replace(&mut *state.write().unwrap(), ContentState::Empty);
+
+        let (res, state_cont) = match state_cont {
+            ContentState::Empty => {
+                let state_cloned = state.clone();
+                let content = content.clone();
+                thread::spawn(move || {
+                    let res = content.1.generate(content.0);
+
+                    *state_cloned.write().unwrap() = match res {
+                        Ok(res) => ContentState::Ok(res),
+                        Err(err) => ContentState::Err(err),
+                    };
+                });
+
+                (None, ContentState::Running)
+            },
+            ContentState::Err(error) => 
+                (Some(Err(error)), ContentState::Empty),
+            ContentState::Ok(content) => {
+                // start thread to calculate SIXEL blob
+                let sixel_cache = sixel_cache.clone();
+                let state = state.clone();
+
+                thread::spawn(move || {
+                    let res = content.clone().wand_to_sixel(dim.clone());
+                    sixel_cache.write().unwrap().insert(dim, res);
+                    *state.write().unwrap() = ContentState::Ok(content);
+                });
+
+                (None, ContentState::Running)
+            },
+            ContentState::Running => (None, ContentState::Running),
+        };
+
+        let _ = std::mem::replace(&mut *state.write().unwrap(), state_cont);
+
+        res
     }
 }
 

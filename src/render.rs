@@ -10,7 +10,7 @@ use miniserde::{json, Serialize, Deserialize};
 use crate::error::Result;
 use crate::utils;
 use crate::node_view::NodeView;
-use crate::content::{Content, Node};
+use crate::content::{Content, Node, NodeDim};
 
 pub const ART_PATH: &str = "/tmp/nvim_arts/";
 
@@ -130,7 +130,6 @@ impl Render {
         // initialize last line and top offset, so that first iteration gives offset to first item
         let mut last_line = self.metadata.file_range.0 as usize;
         let mut top_offset: isize = 0;
-        let char_height = self.metadata.char_height;
     
         // perform fold skipping if folded in
         let mut skip_to = None;
@@ -143,7 +142,7 @@ impl Render {
                     top_offset += node.range.0 as isize - last_line as isize;
                     last_line = node.range.0;
 
-                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset, char_height)?;
+                    pending |= Render::draw_node(&self.metadata, &self.stdout, node, node_view, top_offset)?;
                 },
                 FoldInner::Fold(ref fold) => {
                     // offset has a header of single line
@@ -178,74 +177,39 @@ impl Render {
 
         }
 
+        //dbg!(&pending);
+
         Ok(if pending { 1 } else { 0 })
     }
-    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize, char_height: usize) -> Result<bool> {
+    pub fn draw_node(metadata: &Metadata, stdout: &Stdout, node: &mut Node, view: &mut NodeView, top_offset: isize) -> Result<bool> {
+        // calculate new view and height of node
         let new_view = NodeView::new(node,  metadata, top_offset);
-
-        // check if available and extract from shared mutex
+        let char_height = metadata.char_height;
         let theight = node.range.1 - node.range.0;
-        //dbg!(&node.available().is_some());
-        let img = match node.available() {
-            Some(Ok(img)) => img,
-            Some(Err(err)) => return Err(err),
-            None => {
-                return Ok(new_view.is_visible());
-            }
+
+        let (pos, crop) = match (&view, &new_view) {
+            (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) =>
+                (*pos, None),
+            (NodeView::Hidden, NodeView::LowerBorder(pos, height)) =>
+                (*pos, Some((height * char_height, 0))),
+            (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height =>
+                (*pos, Some((height * char_height, 0))),
+            (NodeView::Hidden, NodeView::UpperBorder(y, height)) => 
+                (0, Some((height * char_height, y * char_height))),
+            (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old =>
+                (0, Some((height * char_height, y * char_height))),
+            _ => return Ok(false),
         };
 
-        let data: Option<(Vec<u8>, usize)> = match (&view, &new_view) {
-            (NodeView::UpperBorder(_, _) | NodeView::LowerBorder(_, _) | NodeView::Hidden, NodeView::Visible(pos, _)) => {
-                // clone and fit
-                img.fit(100000, theight * char_height);
-                Some((
-                    img.write_image_blob("sixel").unwrap(),
-                    *pos
-                ))
-            }, 
-            (NodeView::Hidden, NodeView::UpperBorder(y, height)) => {
-                // clone and crop
-                img.fit(100000, theight * char_height);
-                img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
-                Some((
-                    img.write_image_blob("sixel").unwrap(),
-                    0
-                ))
-            },
-            (NodeView::UpperBorder(y_old, _), NodeView::UpperBorder(y, height)) if y < y_old => {
-                // clone and crop
-                img.fit(100000, theight * char_height);
-                img.crop_image(img.get_image_width(), height * char_height, 0, (y * char_height) as isize).unwrap();
-                Some((
-                    img.write_image_blob("sixel").unwrap(),
-                    0
-                ))
-            },
-            (NodeView::Hidden, NodeView::LowerBorder(pos, height)) => {
-                // clone and crop
-                img.fit(100000, theight * char_height);
-                img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
-                Some((
-                    img.write_image_blob("sixel").unwrap(),
-                    *pos
-                ))
-            },
-            (NodeView::LowerBorder(_, height_old), NodeView::LowerBorder(pos, height)) if height_old < height => {
-                // clone and crop
-                img.fit(100000, theight * char_height);
-                img.crop_image(img.get_image_width(), height * char_height, 0, 0).unwrap();
-                Some((
-                    img.write_image_blob("sixel").unwrap(),
-                    *pos
-                ))
-            },
-            _ => None
+        let dim = NodeDim {
+            height: theight * char_height,
+            crop
         };
 
-        *view = new_view;
+        if let Some(buf) = node.get_sixel(dim) {
+            // bail out if an error happened during conversion
+            let mut buf = buf?;
 
-
-        if let Some((mut buf, pos)) = data {
             //dbg!(&metadata.viewport.0, &metadata.winpos.1);
             let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();
             //for _ in 0..(node.range.1-node.range.0 - 1) {
@@ -273,14 +237,15 @@ impl Render {
                 std::mem::forget(stdout);
                 drop(outer_lock);
             }
+
+            Ok(false)
+        } else {
+            Ok(new_view.is_visible())
         }
-
-
-        Ok(false)
     }
 
     pub fn clear_all(&mut self, _: &str) -> Result<()> {
-        for (_, fold) in &mut self.strcts {
+        for fold in self.strcts.values_mut() {
             if let FoldInner::Node(ref mut node) = fold {
                 node.1 = NodeView::Hidden;
             }

@@ -1,7 +1,7 @@
 use crate::render::Metadata;
 use crate::content::Node;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum NodeView {
     Hidden,
     UpperBorder(usize, usize),
