@@ -56,7 +56,7 @@ and install with `source %|PlugInstall`.
 The plugin is currently not mapped to a file format, but can be manually enabled by setting the `filetype` variable to `graphical-preview` or add the follow preamble to your file:
 
 ```vim
-vim: set filetype=markdown.graphical-preview :
+vim: set filetype=markdown.graphics :
 ```
 
 ## FAQ

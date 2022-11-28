@@ -1,7 +1,8 @@
-if exists("g:loaded_math_preview")
+if exists("g:loaded_graphical_preview")
+    echo "Exists"
     finish
 endif
-let g:loaded_math_preview = 1
+let g:loaded_graphical_preview = 1
 
 let s:path = resolve(expand('<sfile>:p:h') . "/../")
 let s:inst = libcallex#load(s:path . "/target/release/libvim_graphical_preview.so")

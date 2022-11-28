@@ -256,6 +256,7 @@ impl Content {
                 Ok((height, line, file_name, id, ContentType::File))
             });
 
+
         let strcts_gen = maths.chain(files)
             .map(|x| x.map(|(height, line, content, id, kind)| {
                 let new_range = (line, line + height);
