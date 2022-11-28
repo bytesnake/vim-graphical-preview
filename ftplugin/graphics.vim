@@ -36,7 +36,7 @@ endfunction
 
 function! s:UpdateMetadata()
     let winpos = win_screenpos("0")
-    if exists('&number')
+    if exists('&number') && &number == 1
         let winpos[1] += &numberwidth
     endif
 

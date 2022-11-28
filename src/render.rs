@@ -210,7 +210,7 @@ impl Render {
             // bail out if an error happened during conversion
             let mut buf = buf?;
 
-            //dbg!(&metadata.viewport.0, &metadata.winpos.1);
+            //dbg!(&metadata.winpos.0, &metadata.winpos.1);
             let mut wbuf = format!("\x1b[s\x1b[{};{}H", pos + metadata.winpos.0, metadata.winpos.1).into_bytes();
             //for _ in 0..(node.range.1-node.range.0 - 1) {
             //    wbuf.extend_from_slice(b"\x1b[B\x1b[K");
